@@ -1,0 +1,23 @@
+services:
+  horadrictube:
+    build: .
+    image: horadrictube:local
+    restart: unless-stopped
+    # Unraid's nobody:users defaults. Use your media owner's IDs on other hosts.
+    user: '${PUID:-99}:${PGID:-100}'
+    ports:
+      - '${PORT:-5000}:5000'
+    environment:
+      API_KEY: '${API_KEY:-}'
+      TYPESAFE_API_KEY: '${TYPESAFE_API_KEY:-}'
+      TONEMAP_BACKEND: '${TONEMAP_BACKEND:-cpu}'
+      TONEMAP_THREADS: '${TONEMAP_THREADS:-2}'
+    volumes:
+      - '${CONFIG_PATH:-./config}:/config'
+      - '${MEDIA_PATH:-./data}:/data'
+      - '${TRANSCODE_PATH:-./transcode}:/transcode'
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

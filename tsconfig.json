@@ -1,10 +1,16 @@
 {
   "compilerOptions": {
-    "target": "es6",
-    "module": "commonjs",
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["bun"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
-    "outDir": "build",
-    "resolveJsonModule": true
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*", "src/config.default.json"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

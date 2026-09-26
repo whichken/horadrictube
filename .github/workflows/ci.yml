@@ -1,0 +1,32 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run test
+      - run: bun run build
+      - run: docker build -t horadrictube:test .
+      - name: Integration tests against the packaged CPU Vulkan stack
+        run: docker run --rm --network none --mount "type=bind,src=$PWD,dst=/workspace,readonly" --workdir /workspace --entrypoint bun horadrictube:test test ./test/integration
+      - name: Container startup smoke test
+        run: |
+          docker run -d --name horadrictube-test -p 5000:5000 horadrictube:test
+          trap 'docker logs horadrictube-test; docker rm -f horadrictube-test' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:5000/health; then exit 0; fi
+            sleep 1
+          done
+          exit 1

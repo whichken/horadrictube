@@ -1,8 +1,11 @@
-.vscode
+.git
+.github
 node_modules
+dist
 build
+config
+data
+out
 transcode
-test
-
-Dockerfile
-README.md
+.env
+*.sqlite*

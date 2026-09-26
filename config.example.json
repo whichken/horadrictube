@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "concurrency": 1,
+  "threads": 2,
+  "suffix": " HEVC",
+  "defaultProfile": "default",
+  "pathMappings": [],
+  "skipHevc": true,
+  "minSavingsPercent": 5,
+  "maxAttempts": 3,
+  "retryDelaySeconds": 60,
+  "encodeTimeoutSeconds": 86400,
+  "maxQueuedJobs": 10000,
+  "profiles": {
+    "default": {
+      "description": "1080p maximum, without upscaling; balanced quality and storage, retain all audio and subtitles.",
+      "crf": 24,
+      "preset": "medium",
+      "maxHeight": 1080,
+      "audio": "copy",
+      "audioBitrate": 192,
+      "hdr": "skip",
+      "delaySeconds": 0
+    },
+    "compact": {
+      "description": "A smaller 720p SDR companion for everyday viewing.",
+      "crf": 26,
+      "preset": "slow",
+      "maxHeight": 720,
+      "audio": "aac",
+      "audioBitrate": 192,
+      "hdr": "tonemap",
+      "delaySeconds": 0
+    }
+  },
+  "ai": {
+    "enabled": false,
+    "model": "jev-latest",
+    "candidates": ["default", "compact"],
+    "minConfidence": 0.8,
+    "timeoutSeconds": 10,
+    "instructions": "Choose a profile that balances storage savings and visual quality for this media. Prefer preserving resolution when uncertain."
+  }
+}

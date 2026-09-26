@@ -1,38 +1,262 @@
-# horadric tube
+# Horadric Tube
 
-Lightweight webhook-based video transcoding container.
+A self-hosted Sonarr/Radarr webhook service that creates smaller HEVC companions for Plex. Originals stay untouched. A file named `Movie.mkv` becomes `Movie HEVC.mkv` in the same directory.
 
-> **IMPORTANT**: This project is in its infancy. It is light on features, changing rapidly, and should not be depended
-> on in it's current iteration. With that said, the code should be very approachable, so crack open that IDE and submit
-> a PR!
+Version 2 is a complete rewrite: Bun 1.4.2, strict TypeScript, built-in SQLite, and direct ffmpeg processes. No Redis, external database, or AI subscription is required. The default profile targets **1080p maximum**, never upscales, and copies every audio track, subtitle, and attachment. Optional TypeSafe Jev selects among your configured profiles.
 
-## Quick start
+## Run on Unraid / Docker
+
+This checkout builds the new image locally; an existing registry `latest` image may still contain version 1.
+
+1. Copy `.env.example` to `.env`. Set your config, media, and scratch paths. Set `PUID`/`PGID` to the account that owns your media (Unraid commonly uses `99:100`). Set `API_KEY` to a long random secret if you want authentication.
+2. Create those host directories before starting Docker and make them writable by that UID/GID. Scratch space must fit a complete encode; publication temporarily needs another output-sized file on the destination filesystem.
+3. Run `docker compose up -d --build`.
+4. First start creates `/config/config.json`. Edit it and run `docker compose restart`.
+5. Visit `http://SERVER:5000/health` to confirm startup.
+
+Mount the same media root used by Sonarr and Radarr. If their paths differ inside their containers, configure a mapping:
+
+```json
+"pathMappings": [
+  { "from": "/media", "to": "." }
+]
+```
+
+Here `/media/Movies/Film.mkv` maps to `/data/Movies/Film.mkv`. Mapping destinations are either relative to `DATA_DIR` or absolute paths inside it. The longest matching directory prefix wins; mappings are applied once. Traversal and symlinks escaping the media root are rejected. Directory scans do not follow symlinks.
+
+The default output location is `DATA_DIR`. For a separate destination, mount another directory at `/out` and set `OUT_DIR=/out`; the source directory structure is mirrored there. `/config` must be persistent **local storage**, not an NFS/SMB share. Run one service instance per config directory; SQLite locks out a second instance.
+
+### Connect Sonarr / Radarr
+
+Add a **Webhook** connection under Settings → Connect:
+
+- URL: `http://SERVER:5000/sonarr` or `http://SERVER:5000/radarr`
+- Method: POST
+- Enable import/download and upgrade notifications. They send `Download` events. Other events are acknowledged and ignored.
+- If `API_KEY` is set, use any username and the key as the Basic Auth password, or supply the `X-API-Key` header.
+- Use the connection's Test button. Test events do not enqueue work.
+
+Append `/compact` or another configured profile name to select it explicitly. `/skip` acknowledges without doing work. Unknown profiles are rejected. New jobs return HTTP 202 with job IDs, including existing IDs for duplicate submissions.
+
+Keep webhook routes on your local network or behind your authenticated reverse proxy. Authentication is optional for local deployments; when enabled, it covers everything except `/` and `/health`. HTTP itself does not encrypt the key.
+
+## Encoding behavior
+
+- `default`: libx265, CRF 24, medium preset, at most 1080p, 10-bit output. All audio/subtitles/attachments and global metadata/chapters are copied. Lower resolution sources retain their size (odd dimensions are padded to even values).
+- `compact`: CRF 26, slow preset, at most 720p; all audio tracks become AAC stereo at 192 kbps; HDR is tone-mapped to SDR.
+- Existing HEVC sources and names ending in the configured suffix are skipped by default. Set `skipHevc: false` to allow re-encoding HEVC originals.
+- HDR is **skipped by the default profile**. Set `profiles.default.hdr` to `"tonemap"` to create 1080p SDR companions from HDR10/HLG and supported Dolby Vision sources. This is a deliberate conversion, not HDR preservation.
+- All HDR conversion uses **libplacebo Spline**, perceptual gamut mapping, dynamic peak detection, and Lanczos downscaling. Output is 10-bit limited-range BT.709; HDR mastering/light-level metadata is removed. CPU and GPU modes use the same filter settings. The legacy Hable filter chain has been removed.
+- A completed file is probed, checked for expected codec/dimensions/duration/track counts, and fully decoded for audio/video errors. The source must remain unchanged throughout encoding.
+- By default the output must be at least 5% smaller. Larger or insufficiently smaller encodes are discarded and recorded as skipped.
+- Existing destinations are never overwritten, even if another process creates one during encoding. Publishing copies to a hidden file in the destination directory, flushes it, and atomically links it to the final name. The destination filesystem must support hard links (normal Unraid/Linux media filesystems do).
+- Audio conversion, cropping, arbitrary ffmpeg arguments, tone-mapping backend, and HDR preservation are not inferred by AI. This version supports the explicit settings below; automatic cropping and the old per-stream rules are no longer supported.
+
+### CPU or GPU tone mapping, one image
+
+The main image includes FFmpeg/libplacebo, the Vulkan loader, and Mesa drivers for
+CPU (Lavapipe) and supported AMD/Intel GPUs. **`TONEMAP_BACKEND=cpu` is the default**;
+it requires no GPU passthrough. `TONEMAP_BACKEND=gpu` uses a hardware Vulkan GPU.
+Decoding and libx265 encoding remain on the CPU in both modes. Only HDR filtering
+and scaling use the selected backend; SDR jobs do not initialize Vulkan.
+
+Build the updated image once, then validate or run CPU mode:
 
 ```bash
-docker run -p 5000:5000 -v /mnt/user/appdata/horadric:/config -v /mnt/user/your_media:/data -v /mnt/user/your_media:/out ghcr.io/whichken/horadrictube/horadrictube
+docker compose build
+docker compose run --rm --no-deps horadrictube bun dist/index.js --check-media
+docker compose up -d
 ```
+
+`--check-media` runs a tiny synthetic HDR → Spline → 10-bit x265 encode, prints
+`media.check.passed` with the actual device name, and exits without opening the
+queue, changing config, or processing your media. Normal startup runs the same
+check if any configured profile enables tone mapping. Missing filters/drivers or
+GPU permissions stop startup with a useful error. GPU mode does **not** silently
+switch to CPU. CPU mode pins the Lavapipe driver even when a GPU is exposed.
+
+For **AMD/Intel**, use the included runtime override. Select your host's render
+device and its owning group (these values can also go in `.env`):
+
+```bash
+export VULKAN_RENDER_DEVICE=/dev/dri/renderD128
+export RENDER_GID="$(stat -c '%g' "$VULKAN_RENDER_DEVICE")"
+docker compose -f compose.yaml -f compose.gpu.yaml run --rm --no-deps \
+  horadrictube bun dist/index.js --check-media
+docker compose -f compose.yaml -f compose.gpu.yaml up -d
+```
+
+For **NVIDIA**, install/configure the host's NVIDIA Container Toolkit first, then:
+
+```bash
+docker compose -f compose.yaml -f compose.nvidia.yaml run --rm --no-deps \
+  horadrictube bun dist/index.js --check-media
+docker compose -f compose.yaml -f compose.nvidia.yaml up -d
+```
+
+The NVIDIA override requests one GPU and the `graphics,utility` driver
+capabilities; Vulkan needs `graphics`. Driver libraries are supplied by the host
+toolkit. See [NVIDIA's runtime documentation](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html)
+and [Docker's GPU configuration](https://docs.docker.com/compose/how-tos/gpu-support/).
+Use only one GPU override. On Unraid, set the equivalent environment variables,
+device/group mappings, or NVIDIA GPU assignment in the container template.
+
+To return to CPU mode, keep `TONEMAP_BACKEND=cpu` in `.env` and recreate using only
+`docker compose up -d --force-recreate`. Backend changes require recreating the
+container, **not rebuilding the image**. To convert HEVC HDR sources, also set
+`skipHevc: false` and the chosen profile's `hdr: "tonemap"` in `config.json`.
+
+This covers HDR10/PQ, HLG, and the Dolby Vision cases below on supported Linux
+Vulkan stacks; it does not make every GPU/driver compatible. CPU rendering competes with
+x265 for cores: `TONEMAP_THREADS` controls Lavapipe's thread count independently
+of the config's x265 `threads` setting. GPU mode lets libplacebo choose among the
+hardware devices exposed to the container. Current defaults match the comparison:
+Spline, peak detection on, smoothing period 20, and contrast recovery off.
+
+### Dolby Vision to SDR
+
+The goal is ordinary SDR with correctly interpreted colors. Dolby Vision output
+and full enhancement-layer reconstruction are not required or attempted.
+
+- **Profile 5:** enable libplacebo's Dolby Vision color reshaping before Spline
+  tone mapping. Ordinary color tags can legitimately be unspecified. The probe
+  decodes the first 32 video packets and requires parsed Dolby Vision metadata on
+  every resulting frame; otherwise conversion is refused, avoiding the common
+  green/purple result from treating these pixels as ordinary HDR10. Decoder
+  errors during the encode are fatal. This initial check is not a guarantee that
+  the rest of a damaged file is valid.
+- **Profile 7 with Blu-ray-compatible base (compatibility ID 6):** use the HDR10
+  base, ignoring Dolby metadata and the enhancement layer. This produces an SDR
+  rendition without promising Dolby's full rendering. Files with a separate
+  second video track still hit the existing multiple-video-stream restriction.
+- **Profile 8.1 / 8.4 (compatibility IDs 1 / 4):** use the HDR10 / HLG base,
+  respectively. Dolby-specific processing is disabled for these base-layer paths.
+- Missing or unsupported profile/base-layer combinations are skipped explicitly.
+
+All conversions emit BT.709 SDR and strip Dolby frame metadata. Validation rejects
+output that still advertises Dolby Vision. `/plan` and `job.dolbyvision` logs report
+`reshape`, `hdr10-base`, or `hlg-base`. Keep `skipHevc: false` and `hdr: "tonemap"`
+on the desired profile to process the usual HEVC Dolby Vision files.
+
+See [optional real DV regression samples](test/fixtures/README.md),
+[FFmpeg's Dolby metadata handling](https://ffmpeg.org/ffmpeg-filters.html#libplacebo),
+and [Dolby's profile/base compatibility definitions](https://ott.dolby.com/OnDelKits/Dolby_Vision_Online_Delivery_Kit/v1/Documentation/Specs/Visio_Profiles/help_files/topics/c_dovi_profiles_public.html).
 
 ## Configuration
 
-### Docker Mounts
+A basic example is in [`config.example.json`](config.example.json). [`config.server.example.json`](config.server.example.json) reproduces the supplied `default` and `dual` server profiles, omitting the retired `low` profile. Unknown settings and invalid values fail startup. Restart after editing; queued jobs use the configuration active when they execute. Delays are fixed when enqueued, using the default profile for `auto` jobs.
 
-#### Required
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `version` | `2` | Version 2 format; unversioned legacy profile files are adapted in memory |
+| `concurrency` | `1` | Simultaneous encodes (1–16) |
+| `threads` | `2` | x265 thread pool size per encode; other ffmpeg stages may use additional threads |
+| `defaultProfile` | `default` | Profile for ordinary requests and AI fallback |
+| `suffix` | ` HEVC` | Appended to the source stem; must end in HEVC and contain no path separators |
+| `pathMappings` | `[]` | Remote webhook paths → local media paths |
+| `skipHevc` | `true` | Avoid re-encoding existing HEVC video |
+| `minSavingsPercent` | `5` | Required storage reduction (0 still rejects larger files) |
+| `maxAttempts` | `3` | Maximum attempts after processing errors |
+| `retryDelaySeconds` | `60` | Exponential retry base: 60s, 120s, … |
+| `encodeTimeoutSeconds` | `86400` | Timeout for each encode and full-decode validation |
+| `maxQueuedJobs` | `10000` | Queue admission limit for pending/running jobs |
 
-- **`/data`** - The source directory for your media files. This is where the application will try to read your media from.
-- **`/out`** - The destination directory where transcoded media will be written to. This is provided as a separate mount
-  to allow for greater flexibility. It's possible that you may want your `/data` and `/out` mounts to bind to the same
-  host location.
-- **`/config`** - The directory to store the configuration. If this directory doesn't have a `config.json` file in it on
-  startup, the container will write out a default config. You should modify this config and then restart the container.
+Each profile accepts `description`, `crf` (0–40), `preset`, `maxHeight` (144–4320 or `null`), `maxWidth` (2–16384 or `null`), `audio` (`copy` or `aac`), `audioBitrate` (64–512 kbps), `hdr` (`skip` or `tonemap`), and `delaySeconds`. Width/height limits preserve aspect ratio and never upscale. Optional `selection`, `encoder`, `fileRenames`, and per-profile `pathMappings` implement the server rules described below. `extension` accepts `mkv`. Output is always Matroska (`.mkv`) to retain supported subtitle/audio formats. Unsupported streams/muxing combinations fail visibly; selected tracks are not silently dropped. Attached cover art and data streams are omitted; multiple main video streams are skipped.
 
-#### Optional
+### Stream selection and ordered encoding rules
 
-- `/bin/ffmpeg` - Allows you to override the ffmpeg executable with a custom version. The container comes prepackaged
-  with a semi-recent git build from https://johnvansickle.com/ffmpeg/.
-- `/bin/ffprobe` - Allows you to override the ffprobe executable with a custom version.
-- `/transcode` - The scratch directory for in-progress transcodes. If not provided, it will remain internal to the docker
-  container.
+The server example retains the original rule structure:
 
-### Environment Variables
+- `selection.audio` and `selection.subtitle` each accept `primary`, `secondary`, and `allowSecondary`. The first source track matching any primary rule becomes primary. Audio falls back to the first available track; subtitles have no implicit primary. Primary tracks are mapped first and marked default; other selected tracks have default cleared. Forced and other existing dispositions are retained. Without a selection section for a track type, every track of that type is retained unchanged.
+- Secondary rules include **all** matching remaining tracks in source order, without duplicates. This matches the original engine, including `dual`'s non-English rule despite its old description saying "first". Add `"limit": 1` to that secondary rule to keep only its first match.
+- Rules match `language`, `title`, `forced`, `default`, `primary`, `codec`, `bitrate`, `channels`, `filename`, `width`, `height`, or `hdr`. Supported operators are `==`, `!=`, `>`, `>=`, `<`, `<=`, and case-insensitive `contains`. Clauses within a rule are ANDed. Missing metadata does not match a condition, including `!=`; missing audio bitrate therefore cannot trigger a copy shortcut. Bitrate uses ffprobe's stream value, then Matroska `BPS`/`BPS-eng` tags.
+- `encoder` rules are evaluated in order against the **original source metadata** and merged property by property. Later matching rules override earlier settings. Video supports `codec: "libx265"`, `crf`, `preset`, `crop`, `size`, and `tonemap`. Audio supports `copy`, `aac`, `ac3`, or `eac3`, plus `bitrate` and `channels`. Subtitle rules support `copy`. When a later rule selects `copy`, bitrate/channel conversion flags are omitted.
+- `size: "1920:-2"` gives the original width-based limit when guarded by `width > 1920`; `-2:1080` and explicit positive width/height pairs are also supported. Rule sizes are applied after cropping, followed by optional `maxWidth`/`maxHeight` bounds. `tonemap: true` uses the same libplacebo SDR pipeline as `hdr: "tonemap"`; ordinary SDR inputs are not tone mapped.
+- `crop: true` samples up to ten seconds near 10%, 50%, and 90% of the video and uses the enclosing detected picture area. Detection happens before resizing and tone mapping. Failed or inconclusive detection retains the full frame and logs it. Sampling cannot guarantee that a variable-aspect-ratio title never uses a larger picture area elsewhere; disable the crop rule for those titles. `/plan` performs this detection too, so it may take longer than a simple probe.
+- `fileRenames` applies JavaScript regex replacements sequentially to the filename **without its extension**. `$&` and capture substitutions work. A missing HEVC suffix is appended after replacements to keep companions identifiable and avoid overwriting originals. Replacements cannot create directory paths.
+- Per-profile `pathMappings` overrides the global mapping list. Explicit profile URLs use that profile's mapping; `auto` uses the default profile's mapping before probing and AI selection. Mapping destinations must be actual container paths inside `DATA_DIR` (or relative to it).
 
-- `CONCURRENCY` - The amount of encodes that can be executing at the same time. Defaults to 2.
+In the supplied server example, `default` uses **EAC3 384k/5.1** for primary surround audio and **AAC 96k/stereo** for commentary. `dual` uses **AC3 384k/5.1** for surround tracks in both languages. Both retain the specified AAC/AC3 copy shortcuts, English/forced/SDH subtitle selection, CRF 23/slow, remux cropping, and ordered filename replacements.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT`, `HOST` | `5000`, `0.0.0.0` | Listen address |
+| `CONFIG_DIR` | `./config` (`/config` in Docker) | Configuration and SQLite job history |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Allowed media root |
+| `OUT_DIR` | Same as `DATA_DIR` | Companion destination root |
+| `TRANSCODE_DIR` | `./transcode` (`/transcode` in Docker) | Encoding scratch space |
+| `CONCURRENCY` | Config value | Optional concurrency override |
+| `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Executable paths |
+| `TONEMAP_BACKEND` | `cpu` | `cpu` (Lavapipe) or `gpu` (hardware Vulkan); no silent fallback |
+| `TONEMAP_THREADS` | `2` | Lavapipe threads per tone-mapping process, 1–64; independent of x265 |
+| `VULKAN_CPU_ICD` | Auto-detected | Optional absolute path to Lavapipe's ICD JSON for native/custom installations |
+| `API_KEY` | Unset | Bearer token, X-API-Key, or Basic Auth password |
+| `TYPESAFE_API_KEY` | Unset | Optional server-side TypeSafe credential |
+
+`PUID`, `PGID`, and the `*_PATH` variables in `.env.example` are Compose substitutions, not variables interpreted by the application. Plain `docker run` users should use `--user UID:GID` and bind mounts directly.
+
+## Optional TypeSafe Jev
+
+Set `TYPESAFE_API_KEY` and `ai.enabled: true`. Routes without a profile then use `auto`; `/manual/auto`, `/sonarr/auto`, and `/radarr/auto` can also request it explicitly. Explicit profile names bypass AI.
+
+Jev answers one bounded Choice question using [TypeSafe's System One API](https://docs.typesafe.ai/api). It selects a name from `ai.candidates` using the profiles' descriptions/basic encoding settings (selection rules, filenames, renames, and path mappings are not sent) and `ai.instructions`. It receives codec, dimensions, audio channels, color metadata, and duration—no video bytes, paths, filenames, track titles, or webhook bodies. It cannot produce commands or filenames. All validation, skip rules, and publishing checks still run locally.
+
+The returned choice must be allowed and meet `ai.minConfidence` (default 0.8). Missing keys, invalid responses, API errors, timeouts, no-match answers, and low confidence use `defaultProfile`. This threshold is a starting policy, not a guarantee of visual quality; evaluate it with your own media. Selection and fallback reasons are recorded in each job's `decision`. API calls may incur charges. Plan previews also call Jev when enabled. The integration uses the documented HTTP contract and is covered by mocked response tests; live calls require your key.
+
+## API and queue operations
+
+Examples assume `API_KEY` is set in your shell. Omit the Authorization header if authentication is disabled.
+
+```bash
+# A file or recursively scanned directory; use paths inside DATA_DIR or a configured mapping.
+curl -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"path":"Movies"}' http://localhost:5000/manual
+
+# Preview a single file: probes and optionally samples crop, without encoding an output or enqueueing.
+curl -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"path":"Movies/Film.mkv"}' http://localhost:5000/plan/default
+
+# Queue counts and recent jobs. Pagination: ?limit=100&offset=0 (maximum limit 500).
+curl -H "Authorization: Bearer $API_KEY" http://localhost:5000/jobs
+curl -H "Authorization: Bearer $API_KEY" http://localhost:5000/jobs/JOB_ID
+
+# Retry a failed or skipped job after correcting its cause.
+curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:5000/jobs/JOB_ID/retry
+```
+
+Jobs move through `queued`, `running`, and `completed`/`skipped`/`failed`. They expose attempts, progress, output path, last message, and the JSON-encoded profile decision. Progress measures encoding; it stays below 100 until validation and publication finish. Status details and errors are available through the API and JSON stdout logs.
+
+Submission deduplication uses source path, requested profile, and source file identity/size/modification time. Repeated unchanged submissions return the same job—even after it fails—so use the retry endpoint to request another attempt. Requests received before a source is visible are queued and retried. A changed source can create a new job, but any existing companion is still left untouched. Profiles may produce different filenames through their rename rules. When they resolve to the same destination, the first published companion wins.
+
+SIGTERM/SIGINT stops admission, terminates child processes (force-killing after five seconds if needed), and requeues interrupted work. Startup recovers jobs left running after an abrupt exit. Job-specific temporary files are removed on normal completion/failure and before a recovered job runs. After a hard crash followed by config/path changes, old scratch or hidden `.horadrictube-*.partial` files may need manual cleanup with the service stopped. Job history is retained indefinitely. Back up `config.json` and `jobs.sqlite` while the service is stopped.
+
+## Migrating from version 1
+
+1. Stop the old container. Its in-memory queue cannot be recovered; resubmit any unfinished files.
+2. Back up your existing `config.json` and compose/container settings.
+3. Keep a supported unversioned v1 profile file, or copy `config.server.example.json` for the supplied server profiles. Legacy profiles are strictly validated and adapted in memory, including root-relative path mappings; the file is **never automatically overwritten**. Unsupported settings fail startup rather than being silently discarded.
+4. Preserve your `/data`, optional `/out`, and `/transcode` bindings. If the old `/data` and `/out` bindings point to the same location, you only need `/data` now. Make the directories writable by the new container's non-root UID/GID.
+5. Unversioned legacy mapping destinations are automatically made relative to `DATA_DIR`: `/Television/` becomes `Television/`, and `/` becomes `.`. The server example already uses this version 2 form, resolving `/media/Series/file.mkv` to `/data/Television/Series/file.mkv` with the default mount. For explicit version 2 configurations, absolute destinations refer to actual container paths inside `DATA_DIR`.
+6. Legacy `selection`, the supported ordered `encoder` rules above, `fileRenames`, `extension: "mkv"`, and per-profile `pathMappings` are supported. Legacy `delay` in minutes becomes `delaySeconds`. Legacy files automatically allow HEVC input (`skipHevc: false`); explicit version 2 files must set that flag themselves for HEVC HDR/Dolby Vision conversion. Profiles without rules retain the simpler version 2 behavior. The minimum-savings gate still applies (default 5%).
+7. Start the new container, run the webhook Test, inspect `/plan/default` for a representative file, then submit it and inspect `/jobs`.
+
+Legacy `/sonarr/:profile`, `/radarr/:profile`, and `/manual/:profile` URLs remain. Successful queue submissions now return 202 and JSON instead of 204. Selecting a nonexistent profile is an error instead of silently using the default.
+
+## Local development and validation
+
+Bun 1.4.2 is pinned in `.bun-version`, `package.json`, Docker, and CI. The application uses `Bun.serve` for HTTP, `Bun.spawn` for ffmpeg, `bun:sqlite` for durable jobs, `Bun.file`/`Bun.write` for file data, and `bun:test` for tests. Directory operations, file identity checks, exclusive opens, hard links, and fsync use Bun's `node:fs` compatibility API because the corresponding operations are not exposed by `Bun.file`. No Node runtime is required.
+
+Requires Bun **1.4.2+** and ffmpeg/ffprobe with libx265. Tone mapping additionally requires a libplacebo build with Spline/perceptual gamut mapping and a working Vulkan backend. The Docker image uses Debian 13 (trixie) FFmpeg/Mesa packages. Native CPU mode needs `mesa-vulkan-drivers` (Debian/Ubuntu) or `vulkan-swrast` (Arch); native GPU mode needs a compatible Vulkan driver and `TONEMAP_BACKEND=gpu`. Verify with `bun src/index.ts --check-media`.
+
+```bash
+bun install --frozen-lockfile
+bun run check
+bun run test
+bun run test:integration  # Real ffmpeg and the configured Vulkan backend; no external services.
+bun run build           # Optional bundle; bun start runs TypeScript directly.
+bun start
+```
+
+Tests cover config validation, path mapping and symlink containment, webhook normalization/auth, atomic batch admission and deduplication, durable recovery, exclusive queue ownership, AI fallback, stream planning, real transcoding, PQ/HLG to SDR conversion, safe publication, and child-process termination. CI runs integration tests against the image's CPU Vulkan stack and smoke-tests startup. Image publishing runs on version tags or manual dispatch and retains the original `ghcr.io/<owner>/<repo>/horadrictube` image path.
+
+Licensed under GPL-3.0, matching the repository's existing `LICENSE` file.

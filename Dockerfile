@@ -1,39 +1,27 @@
-FROM node:12 as build
-WORKDIR /usr/app
+FROM oven/bun:1.4.2 AS build
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY tsconfig.json ./
+COPY src ./src
+RUN bun run build
 
-# Install ffmpeg
-RUN wget https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz && \
-  wget https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz.md5 && \
-  md5sum -c ffmpeg-git-amd64-static.tar.xz.md5 && \
-  tar -xf ffmpeg-git-amd64-static.tar.xz --strip-components 1 -C /bin --wildcards --no-anchored 'ffmpeg' && \
-  tar -xf ffmpeg-git-amd64-static.tar.xz --strip-components 1 -C /bin --wildcards --no-anchored 'ffprobe' && \
-  rm ffmpeg-git-amd64-static.tar.xz*
-
-# Install dependencies
-COPY package.json .
-RUN yarn
-
-# Compile the typescript
-COPY . .
-RUN yarn build
-
-
-FROM node:12-alpine
-WORKDIR /usr/app
-
-# Copy over the artifacts from the build stage
-COPY --from=build ["/bin/ffmpeg", "/bin/ffprobe", "/bin/"]
-COPY --from=build /usr/app/node_modules /usr/node_modules
-COPY --from=build /usr/app/build /usr/app
-
+FROM debian:trixie-slim
+COPY --from=build /usr/local/bin/bun /usr/local/bin/bun
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg libvulkan1 mesa-vulkan-drivers tini ca-certificates passwd \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --uid 1000 bun
+WORKDIR /app
+COPY --from=build /app/dist ./dist
+COPY LICENSE ./LICENSE
+RUN mkdir -p /config /data /transcode && chown bun:bun /config /data /transcode
+USER bun
+ENV NODE_ENV=production PORT=5000 CONFIG_DIR=/config DATA_DIR=/data TRANSCODE_DIR=/transcode \
+    TONEMAP_BACKEND=cpu TONEMAP_THREADS=2 XDG_CACHE_HOME=/tmp/horadrictube-cache
+RUN MESA_SHADER_CACHE_DISABLE=true bun dist/index.js --check-media
 EXPOSE 5000
-
-VOLUME ["/data", "/out", "/config", "/transcode"]
-
-ENV PORT=5000 \
-  DATA_DIR=/data/ \
-  OUT_DIR=/out/ \
-  CONFIG_DIR=/config/ \
-  TRANSCODE_DIR=/transcode/
-
-CMD [ "node", "index.js" ]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
+  CMD bun -e "fetch('http://127.0.0.1:'+(Bun.env.PORT||5000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bun", "dist/index.js"]

@@ -1,56 +1,44 @@
-name: Docker
-
+name: Publish Docker image
 on:
   push:
-    # Publish `main` as Docker `latest` image.
-    branches:
-      - main
-
-    # Publish `v1.2.3` tags as releases.
-    tags:
-      - v*
-
-env:
-  IMAGE_NAME: horadrictube
-
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
 jobs:
-  push:
+  publish:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-
     steps:
-      - uses: actions/checkout@v2
-
-      # Improve layer cacheing at the expense of ffmpeg version bumps
-      - name: Docker Layer Caching
-        uses: satackey/action-docker-layer-caching@v0.0.11
-        continue-on-error: true
-
-      - name: Build image
-        timeout-minutes: 10
-        run: docker build . --file Dockerfile --tag $IMAGE_NAME
-
-      - name: Log into registry
-        run: echo "${{ secrets.DEPLOY_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Push image
-        run: |
-          IMAGE_ID=ghcr.io/${{ github.repository }}/$IMAGE_NAME
-
-          # Change all uppercase to lowercase
-          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-
-          # Strip git ref prefix from version
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-
-          # Strip "v" prefix from tag name
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-
-          # Use Docker `latest` tag convention
-          [ "$VERSION" == "main" ] && VERSION=latest
-
-          echo IMAGE_ID=$IMAGE_ID
-          echo VERSION=$VERSION
-
-          docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
-          docker push $IMAGE_ID:$VERSION
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: bun install --frozen-lockfile
+      - run: bun run check && bun run test && bun run test:integration
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image name
+        id: image
+        # Retain the original repository's image location.
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/horadrictube" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

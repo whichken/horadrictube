@@ -1,0 +1,9 @@
+# AMD/Intel Vulkan GPU access. Combine with compose.yaml; uses the same image.
+services:
+  horadrictube:
+    environment:
+      TONEMAP_BACKEND: gpu
+    devices:
+      - '${VULKAN_RENDER_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128'
+    group_add:
+      - '${RENDER_GID:?Set RENDER_GID to the numeric group owning the render device}'

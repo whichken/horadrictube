@@ -1,0 +1,13 @@
+# Requires NVIDIA Container Toolkit on the host. Uses the same application image.
+services:
+  horadrictube:
+    environment:
+      TONEMAP_BACKEND: gpu
+      NVIDIA_DRIVER_CAPABILITIES: graphics,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,26 +1,30 @@
 {
-  "name": "horadricjs",
-  "version": "0.1.0",
-  "description": "Lightweight webhook based video transcoding container",
-  "main": "index.js",
-  "repository": "git@github.com:whichken/horadricjs.git",
-  "author": "whichken",
-  "license": "MIT",
+  "name": "horadrictube",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Durable Sonarr and Radarr HEVC transcoding service",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "packageManager": "bun@1.4.2",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "DEBUG=true nodemon --cwd src index.ts"
+    "build": "bun build ./src/index.ts --target=bun --outdir=dist --sourcemap=external",
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "check": "tsc --noEmit",
+    "test": "bun test ./test/unit",
+    "test:integration": "bun test ./test/integration",
+    "format": "prettier --write src test",
+    "format:check": "prettier --check src test"
   },
   "dependencies": {
-    "consola": "^2.15.0",
-    "express": "^4.17.1",
-    "fluent-ffmpeg": "^2.1.2",
-    "p-limit": "^3.1.0"
+    "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/express": "^4.17.11",
-    "@types/fluent-ffmpeg": "^2.1.16",
-    "nodemon": "^2.0.7",
-    "ts-node": "^9.1.1",
-    "typescript": "^4.1.3"
+    "@types/bun": "^1.4.2",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.0"
   }
 }

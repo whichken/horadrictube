@@ -1,101 +1,73 @@
-import { join } from "path"
-import { lstatSync, existsSync, readdirSync } from "fs"
-import express, { json } from "express"
+import { usesToneMapping } from './config.ts';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { runtime, loadConfig } from './config.ts';
+import { Store } from './store.ts';
+import { Worker } from './worker.ts';
+import { createApp } from './server.ts';
+import { run } from './process.ts';
+import { errorMessage, log } from './log.ts';
+import { checkToneMapping } from './tonemap.ts';
 
-import { logger } from "./logger"
-import { getProfile, getSourcePath, verifyConfigExists } from "./settings"
-import { Queue } from "./queue"
-import { SonarrEvent } from "./schemas/sonarr"
-import { RadarrEvent } from "./schemas/radarr"
-
-verifyConfigExists()
-
-const app = express()
-const queue = new Queue()
-
-// Middleware
-app.use(json())
-
-// Log all incoming requests
-app.use((req, _res, next) => {
-  logger.debug(`[${req.ip}] ${req.method} ${req.path}`)
-  if (req.body) logger.debug("Request body.", req.body)
-  next()
-})
-
-app.get("/", (_req, res) => {
-  return res.json({ success: true })
-})
-
-app.post("/manual(/:profile)?", (req, res) => {
-  const event = req.body as { path: string }
-
-  if (req.params.profile === "skip") {
-    logger.info('Skipping request due to "skip" profile being used.')
-    return res.status(204).send()
+async function main(): Promise<void> {
+  const rt = runtime();
+  if (Bun.argv.includes('--check-media')) {
+    await run(rt.ffprobe, ['-version'], { timeoutMs: 10000 });
+    log('media.check.passed', await checkToneMapping(rt));
+    return;
   }
-
-  if (!event.path) return res.status(400).json({ error: "Must provide path" })
-
-  // Allow directories instead of just a file
-  const profile = getProfile(req.params.profile)
-  let path = event.path
-  for (const mapping of profile.pathMappings || [])
-    if (path.startsWith(mapping.from)) path = path.replace(mapping.from, mapping.to)
-  path = getSourcePath(path)
-
-  if (!existsSync(path)) return res.status(400).json({ error: "Path doesn't exist" })
-
-  if (lstatSync(path).isDirectory()) {
-    const files = readdirSync(path)
-    files.forEach(file => queue.process(join(event.path, file), req.params.profile))
-  } else {
-    queue.process(event.path, req.params.profile)
+  const config = await loadConfig(rt);
+  await Promise.all(
+    [rt.dataDir, rt.outDir, rt.transcodeDir].map((path) => mkdir(path, { recursive: true })),
+  );
+  await run(rt.ffprobe, ['-version'], { timeoutMs: 10000 });
+  const encoders = await run(rt.ffmpeg, ['-hide_banner', '-encoders'], { timeoutMs: 10000 });
+  if (!encoders.includes('libx265')) throw new Error('ffmpeg must include the libx265 encoder');
+  if (Object.values(config.profiles).some(usesToneMapping))
+    log('tonemap.ready', await checkToneMapping(rt));
+  const store = new Store(join(rt.configDir, 'jobs.sqlite'));
+  const worker = new Worker(store, config, rt);
+  let app: ReturnType<typeof createApp>;
+  try {
+    app = createApp(config, rt, store);
+  } catch (error) {
+    store.close();
+    throw error;
   }
-
-  return res.status(204).send()
-})
-
-app.post("/sonarr(/:profile)?", (req, res) => {
-  const event = req.body as SonarrEvent
-
-  if (req.params.profile === "skip") {
-    logger.info('Skipping request due to "skip" profile being used.')
-    return res.status(204).send()
-  }
-
-  // Check for test message
-  if (event.eventType === "Test") {
-    logger.success("Received test message from sonarr!")
-    return res.status(200).send()
-  }
-
-  // Determine path
-  let path = join(event.series.path, event.episodeFile.relativePath)
-  queue.process(path, req.params.profile)
-
-  return res.status(204).send()
-})
-
-app.post("/radarr(/:profile)?", (req, res) => {
-  const event = req.body as RadarrEvent
-
-  if (req.params.profile === "skip") {
-    logger.info('Skipping request due to "skip" profile being used.')
-    return res.status(204).send()
-  }
-
-  // Check for test message
-  if (event.eventType === "Test") {
-    logger.success("Received test message from radarr!")
-    return res.status(200).send()
-  }
-
-  // Determine path
-  let path = join(event.movie.folderPath, event.movieFile.relativePath)
-  queue.process(path, req.params.profile)
-
-  return res.status(204).send()
-})
-
-app.listen(process.env.PORT || 5000, () => logger.info(`Server is listening on ${process.env.PORT || 5000}`))
+  worker.start();
+  log('service.started', {
+    runtime: `bun ${Bun.version}`,
+    port: app.server.port,
+    concurrency: config.concurrency,
+    defaultProfile: config.defaultProfile,
+    ai: config.ai.enabled,
+    authentication: Boolean(rt.apiKey),
+    toneMapBackend: rt.toneMapBackend,
+  });
+  let closing = false;
+  const shutdown = () => {
+    if (closing) return;
+    closing = true;
+    log('service.stopping');
+    void (async () => {
+      const closed = app.stop();
+      const timeout = setTimeout(() => {
+        void app.server.stop(true);
+      }, 10000);
+      await worker.stop();
+      await closed;
+      clearTimeout(timeout);
+      store.close();
+      log('service.stopped');
+    })().catch((error) => {
+      log('shutdown.error', { error: errorMessage(error) });
+      process.exitCode = 1;
+    });
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+main().catch((error) => {
+  log('startup.error', { error: errorMessage(error) });
+  process.exitCode = 1;
+});
