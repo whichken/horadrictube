@@ -9,12 +9,13 @@ RUN bun run build
 FROM debian:trixie-slim
 COPY --from=build /usr/local/bin/bun /usr/local/bin/bun
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg libvulkan1 mesa-vulkan-drivers tini ca-certificates passwd \
+      ffmpeg libvulkan1 mesa-vulkan-drivers libegl1 tini ca-certificates passwd \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 bun
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY LICENSE ./LICENSE
+COPY docker/nvidia_icd.json ./nvidia_icd.json
 RUN mkdir -p /config /data /transcode && chown bun:bun /config /data /transcode
 USER bun
 ENV NODE_ENV=production PORT=5000 CONFIG_DIR=/config DATA_DIR=/data TRANSCODE_DIR=/transcode \

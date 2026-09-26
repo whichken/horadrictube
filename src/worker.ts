@@ -100,27 +100,47 @@ export class Worker {
       if (await exists(output))
         throw new SkipError('Destination already exists; it was left untouched');
       const plan = await createPlan(media, profile, config, source, temp, rt, signal);
+      log('job.decoder', { id: job.id, decoder: plan.decoder, reason: plan.decodeReason });
       if (plan.dolbyVision !== 'none')
         log('job.dolbyvision', { id: job.id, mode: plan.dolbyVision });
       await mkdir(rt.transcodeDir, { recursive: true });
       await removeFile(temp);
       const duration = Number(media.format.duration);
       let lastProgress = 0;
-      await run(rt.ffmpeg, plan.args, {
-        env: plan.hdr ? await toneMappingEnvironment(rt) : undefined,
-        signal,
-        timeoutMs: config.encodeTimeoutSeconds * 1000,
-        onLine: (line) => {
-          if (line.startsWith('out_time_us=') && Date.now() - lastProgress > 1000 && duration > 0) {
-            const progress = (Number(line.slice('out_time_us='.length)) / 1000000 / duration) * 100;
-            if (Number.isFinite(progress))
-              store.patch(job.id, { progress: Math.max(0, Math.min(99, progress)) });
-            lastProgress = Date.now();
-          }
-        },
-      });
-      const encoded = await probe(temp, rt, signal);
-      validateOutput(media, encoded, plan);
+      const deadline = Date.now() + config.encodeTimeoutSeconds * 1000;
+      const encode = async (args: string[]) => {
+        await run(rt.ffmpeg, args, {
+          env: plan.hdr ? await toneMappingEnvironment(rt) : undefined,
+          signal,
+          timeoutMs: Math.max(1, deadline - Date.now()),
+          onLine: (line) => {
+            if (
+              line.startsWith('out_time_us=') &&
+              Date.now() - lastProgress > 1000 &&
+              duration > 0
+            ) {
+              const progress =
+                (Number(line.slice('out_time_us='.length)) / 1000000 / duration) * 100;
+              if (Number.isFinite(progress))
+                store.patch(job.id, { progress: Math.max(0, Math.min(99, progress)) });
+              lastProgress = Date.now();
+            }
+          },
+        });
+        const encoded = await probe(temp, rt, signal);
+        validateOutput(media, encoded, plan);
+      };
+      try {
+        await encode(plan.args);
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!plan.softwareArgs || Date.now() >= deadline) throw error;
+        log('job.decoder.fallback', { id: job.id, error: errorMessage(error) });
+        await removeFile(temp);
+        store.patch(job.id, { progress: 0, message: 'Vulkan failed; restarted with CPU decoding' });
+        lastProgress = 0;
+        await encode(plan.softwareArgs);
+      }
       // Fully decode audio/video before publication; ffprobe alone cannot detect a truncated/corrupt packet stream.
       await run(
         rt.ffmpeg,

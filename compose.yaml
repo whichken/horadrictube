@@ -12,6 +12,8 @@ services:
       TYPESAFE_API_KEY: '${TYPESAFE_API_KEY:-}'
       TONEMAP_BACKEND: '${TONEMAP_BACKEND:-cpu}'
       TONEMAP_THREADS: '${TONEMAP_THREADS:-2}'
+      DECODE_BACKEND: '${DECODE_BACKEND:-cpu}'
+      VULKAN_DEVICE: '${VULKAN_DEVICE:-0}'
     volumes:
       - '${CONFIG_PATH:-./config}:/config'
       - '${MEDIA_PATH:-./data}:/data'

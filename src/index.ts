@@ -43,6 +43,7 @@ async function main(): Promise<void> {
     ai: config.ai.enabled,
     authentication: Boolean(rt.apiKey),
     toneMapBackend: rt.toneMapBackend,
+    decodeBackend: rt.decodeBackend,
   });
   let closing = false;
   const shutdown = () => {

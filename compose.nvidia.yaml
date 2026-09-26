@@ -3,7 +3,9 @@ services:
   horadrictube:
     environment:
       TONEMAP_BACKEND: gpu
-      NVIDIA_DRIVER_CAPABILITIES: graphics,utility
+      NVIDIA_DRIVER_CAPABILITIES: graphics,video,utility
+      # NVIDIA's EGL entry point works without an X11 display server.
+      VK_DRIVER_FILES: /app/nvidia_icd.json
     deploy:
       resources:
         reservations:

@@ -196,6 +196,8 @@ export function createApp(config: Config, rt: Runtime, store: Store) {
           decision,
           ffmpeg: plan.args,
           toneMapBackend: plan.hdr ? rt.toneMapBackend : null,
+          decoder: plan.decoder,
+          decodeReason: plan.decodeReason,
           dolbyVision: plan.dolbyVision,
           note: 'Preview only. Publication also requires successful validation and minimum savings.',
         });

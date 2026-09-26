@@ -57,8 +57,9 @@ Keep webhook routes on your local network or behind your authenticated reverse p
 The main image includes FFmpeg/libplacebo, the Vulkan loader, and Mesa drivers for
 CPU (Lavapipe) and supported AMD/Intel GPUs. **`TONEMAP_BACKEND=cpu` is the default**;
 it requires no GPU passthrough. `TONEMAP_BACKEND=gpu` uses a hardware Vulkan GPU.
-Decoding and libx265 encoding remain on the CPU in both modes. Only HDR filtering
-and scaling use the selected backend; SDR jobs do not initialize Vulkan.
+Decoding defaults to CPU; optional Vulkan Video decoding is described below.
+libx265 encoding always remains on the CPU. With default decoding, only HDR
+filtering and scaling use Vulkan; SDR jobs do not initialize it.
 
 Build the updated image once, then validate or run CPU mode:
 
@@ -94,8 +95,10 @@ docker compose -f compose.yaml -f compose.nvidia.yaml run --rm --no-deps \
 docker compose -f compose.yaml -f compose.nvidia.yaml up -d
 ```
 
-The NVIDIA override requests one GPU and the `graphics,utility` driver
-capabilities; Vulkan needs `graphics`. Driver libraries are supplied by the host
+The NVIDIA override requests one GPU and the `graphics,video,utility` driver
+capabilities; Vulkan needs `graphics`. It selects the supplied EGL-based NVIDIA
+Vulkan manifest (`VK_DRIVER_FILES=/app/nvidia_icd.json`) for headless operation.
+Driver libraries are supplied by the host
 toolkit. See [NVIDIA's runtime documentation](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html)
 and [Docker's GPU configuration](https://docs.docker.com/compose/how-tos/gpu-support/).
 Use only one GPU override. On Unraid, set the equivalent environment variables,
@@ -110,8 +113,58 @@ This covers HDR10/PQ, HLG, and the Dolby Vision cases below on supported Linux
 Vulkan stacks; it does not make every GPU/driver compatible. CPU rendering competes with
 x265 for cores: `TONEMAP_THREADS` controls Lavapipe's thread count independently
 of x265's automatic threading. GPU mode lets libplacebo choose among the
-hardware devices exposed to the container. Current defaults match the comparison:
+hardware devices exposed to the container. The tone-mapping defaults are:
 Spline, peak detection on, smoothing period 20, and contrast recovery off.
+
+### Optional Vulkan Video decoding
+
+Set `DECODE_BACKEND=vulkan` with GPU access to try hardware decoding per file.
+For HDR, also set `TONEMAP_BACKEND=gpu`: decoding, cropping, scaling and Spline
+then share a Vulkan device, and only the resulting SDR frames return to CPU
+memory for libx265. SDR jobs download decoded frames at their original bit depth
+and keep the existing CPU crop/scale filters. Crop detection and output validation
+still use software decoding. No encoder or quality settings change.
+
+The initial candidates are H.264, HEVC and AV1 with 8/10-bit 4:2:0 pixels.
+The GPU/driver must support the actual codec, profile and resolution. Each job
+first decodes up to 32 frames through its planned filter chain with a 30-second
+timeout. Unsupported hardware or a failing filter graph selects CPU decoding and
+logs the reason. If a selected Vulkan encode fails, its partial file is removed
+and the same job starts again with CPU decoding, within the remaining encode
+timeout. Tone mapping retains the explicitly configured backend on fallback.
+Cancellation does not trigger a fallback or another encode.
+
+Dolby Vision Profile 5 uses CPU decoding with the configured CPU or GPU
+libplacebo backend for Dolby reshaping and Spline tone mapping.
+HDR10-compatible and HLG-compatible Dolby base layers can use Vulkan decoding.
+Unsupported codecs/pixel formats use CPU.
+
+`VULKAN_DEVICE` chooses an FFmpeg Vulkan device index or name substring (default
+`0`; for example `NVIDIA`). It selects the shared device when Vulkan decoding is
+used. Without hardware decoding, GPU Spline retains libplacebo's own selection.
+Changes take effect when the container is recreated, without rebuilding it.
+Example using the NVIDIA override:
+
+```bash
+DECODE_BACKEND=vulkan VULKAN_DEVICE=NVIDIA \
+  docker compose -f compose.yaml -f compose.nvidia.yaml up -d
+```
+
+`job.decoder` logs the selected path and preflight result;
+`job.decoder.fallback` reports a restart after a hardware encode failure.
+The plan API also returns `decoder` and `decodeReason`.
+`--check-media` checks tone mapping/encoding only; the actual-source preflight
+checks Vulkan decoding. Unsupported codecs fall back to CPU. Speed depends on
+the source and encoder preset:
+accelerating decode/filtering does not remove the CPU x265 bottleneck.
+
+For an explicit hardware test on a development checkout (fails if Vulkan cannot
+be used, rather than accepting CPU fallback):
+
+```bash
+TONEMAP_BACKEND=gpu VULKAN_DECODE_TEST=1 VULKAN_DEVICE=0 \
+  bun test test/integration/decode.test.ts
+```
 
 ### Dolby Vision to SDR
 
@@ -144,7 +197,7 @@ and [Dolby's profile/base compatibility definitions](https://ott.dolby.com/OnDel
 
 ## Configuration
 
-A basic example is in [`config.example.json`](config.example.json). [`config.server.example.json`](config.server.example.json) reproduces the supplied `default` and `dual` server profiles, omitting the retired `low` profile. Unknown settings and invalid values fail startup. Restart after editing; queued jobs use the configuration active when they execute. Delays are fixed when enqueued, using the default profile for `auto` jobs.
+A basic example is in [`config.example.json`](config.example.json). [`config.server.example.json`](config.server.example.json) illustrates advanced `default` and `dual` profiles with track selection, per-stream encoding, cropping, and filename rules. Unknown settings and invalid values fail startup. Restart after editing; queued jobs use the configuration active when they execute. Delays are fixed when enqueued, using the default profile for `auto` jobs.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -168,7 +221,7 @@ Encoder threading is automatic and has no config knobs. The app sizes the x265
 worker pool using Bun's `node:os` `availableParallelism()` (which follows the
 process's CPU affinity), and x265 chooses how many frames to encode concurrently.
 We pass the detected pool size because x265's native NUMA detection produced no
-worker pool in the Unraid container. We do not pass `-threads:v` or
+worker pool in some container environments. We do not pass `-threads:v` or
 `frame-threads` for queued encodes.
 
 Control CPU allocation through Docker CPU pinning/quotas; `concurrency` still
@@ -196,7 +249,7 @@ The server example retains the original rule structure:
 - `fileRenames` applies JavaScript regex replacements sequentially to the filename **without its extension**. `$&` and capture substitutions work. A missing HEVC suffix is appended after replacements to keep companions identifiable and avoid overwriting originals. Replacements cannot create directory paths.
 - Per-profile `pathMappings` overrides the global mapping list. Explicit profile URLs use that profile's mapping; `auto` uses the default profile's mapping before probing and AI selection. Mapping destinations must be actual container paths inside `DATA_DIR` (or relative to it).
 
-In the supplied server example, `default` uses **EAC3 384k/5.1** for primary surround audio and **AAC 96k/stereo** for commentary. `dual` uses **AC3 384k/5.1** for surround tracks in both languages. Both retain the specified AAC/AC3 copy shortcuts, English/forced/SDH subtitle selection, CRF 23/slow, remux cropping, and ordered filename replacements.
+In the advanced configuration example, `default` uses **EAC3 384k/5.1** for primary surround audio and **AAC 96k/stereo** for commentary. `dual` uses **AC3 384k/5.1** for surround tracks in both languages. Both retain the specified AAC/AC3 copy shortcuts, English/forced/SDH subtitle selection, CRF 23/slow, remux cropping, and ordered filename replacements.
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
@@ -209,6 +262,8 @@ In the supplied server example, `default` uses **EAC3 384k/5.1** for primary sur
 | `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Executable paths |
 | `TONEMAP_BACKEND` | `cpu` | `cpu` (Lavapipe) or `gpu` (hardware Vulkan); no silent fallback |
 | `TONEMAP_THREADS` | `2` | Lavapipe threads per tone-mapping process, 1–64; independent of x265 |
+| `DECODE_BACKEND` | `cpu` | `cpu` or opt-in `vulkan`, with per-file preflight and CPU fallback |
+| `VULKAN_DEVICE` | `0` | Vulkan decoding device index or name substring; shared with GPU Spline |
 | `VULKAN_CPU_ICD` | Auto-detected | Optional absolute path to Lavapipe's ICD JSON for native/custom installations |
 | `API_KEY` | Unset | Bearer token, X-API-Key, or Basic Auth password |
 | `TYPESAFE_API_KEY` | Unset | Optional server-side TypeSafe credential |
@@ -254,7 +309,7 @@ SIGTERM/SIGINT stops admission, terminates child processes (force-killing after 
 
 1. Stop the old container. Its in-memory queue cannot be recovered; resubmit any unfinished files.
 2. Back up your existing `config.json` and compose/container settings.
-3. Keep a supported unversioned v1 profile file, or copy `config.server.example.json` for the supplied server profiles. Legacy profiles are strictly validated and adapted in memory, including root-relative path mappings; the file is **never automatically overwritten**. Unsupported settings fail startup rather than being silently discarded.
+3. Keep a supported unversioned v1 profile file, or copy `config.server.example.json` for advanced profile examples. Legacy profiles are strictly validated and adapted in memory, including root-relative path mappings; the file is **never automatically overwritten**. Unsupported settings fail startup rather than being silently discarded.
 4. Preserve your `/data`, optional `/out`, and `/transcode` bindings. If the old `/data` and `/out` bindings point to the same location, you only need `/data` now. Make the directories writable by the new container's non-root UID/GID.
 5. Unversioned legacy mapping destinations are automatically made relative to `DATA_DIR`: `/Television/` becomes `Television/`, and `/` becomes `.`. The server example already uses this version 2 form, resolving `/media/Series/file.mkv` to `/data/Television/Series/file.mkv` with the default mount. For explicit version 2 configurations, absolute destinations refer to actual container paths inside `DATA_DIR`.
 6. Legacy `selection`, the supported ordered `encoder` rules above, `fileRenames`, `extension: "mkv"`, and per-profile `pathMappings` are supported. Legacy `delay` in minutes becomes `delaySeconds`. Legacy files automatically allow HEVC input (`skipHevc: false`); explicit version 2 files must set that flag themselves for HEVC HDR/Dolby Vision conversion. Profiles without rules retain the simpler version 2 behavior. The minimum-savings gate still applies (default 5%).

@@ -14,6 +14,21 @@ DOVI_SAMPLE_DIR=/path/to/samples TONEMAP_BACKEND=cpu bun run test:integration
 DOVI_SAMPLE_DIR=/path/to/samples TONEMAP_BACKEND=gpu bun run test:integration
 ```
 
+Individual files can instead be supplied with `DOVI_P5_SAMPLE` and
+`DOVI_P81_SAMPLE`. This allows testing a single user-provided sample without
+requiring the other profile. The SDR encode tests use at most two seconds, so
+full-length samples do not cause an unbounded regression test.
+
+```bash
+DOVI_P5_SAMPLE='/path/to/p5.mp4' \
+  TONEMAP_BACKEND=gpu \
+  bun test test/integration/dolby-vision.test.ts
+```
+
+Profile 5 deliberately retains CPU decoding even when Vulkan decoding is requested.
+Run with `TONEMAP_BACKEND=cpu` and `TONEMAP_BACKEND=gpu` to exercise both libplacebo
+backends. In NVIDIA containers, also set `VK_DRIVER_FILES=/app/nvidia_icd.json`.
+
 Tests check decoded Profile 5 metadata, profile-specific handling, SDR tags,
 absence of Dolby Vision signaling, and complete output decoding. They do not
 claim a pixel-exact match to Dolby's reference renderer. Profile 7 routing is

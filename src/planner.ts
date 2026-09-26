@@ -2,6 +2,7 @@ import type { Config, Profile, Runtime } from './config.ts';
 import { makePlan, videoStream, type Crop, type Media } from './media.ts';
 import { run } from './process.ts';
 import { log } from './log.ts';
+import { selectDecodePlan } from './decode.ts';
 
 // Sample three points and use the enclosing rectangle of every detected active
 // area. This favors retaining picture over aggressively removing black bars.
@@ -101,7 +102,7 @@ export async function createPlan(
 ) {
   // Run skip/metadata checks before spending time decoding crop samples.
   const initial = makePlan(media, profile, config, source, temp, rt.toneMapBackend);
-  if (!initial.needsCrop) return initial;
+  if (!initial.needsCrop) return selectDecodePlan(initial, media, rt, signal);
   let crop: Crop | undefined;
   try {
     crop = await detectCrop(media, source, rt, signal);
@@ -113,5 +114,5 @@ export async function createPlan(
   else log('crop.detected', { source, ...crop });
   const plan = makePlan(media, profile, config, source, temp, rt.toneMapBackend, crop);
   plan.needsCrop = false;
-  return plan;
+  return selectDecodePlan(plan, media, rt, signal);
 }

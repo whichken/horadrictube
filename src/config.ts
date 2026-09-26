@@ -132,6 +132,8 @@ export interface Runtime {
   ffprobe: string;
   toneMapBackend: 'cpu' | 'gpu';
   toneMapThreads: number;
+  decodeBackend: 'cpu' | 'vulkan';
+  vulkanDevice: string;
   vulkanCpuIcd?: string;
   apiKey?: string;
   typesafeKey?: string;
@@ -153,6 +155,8 @@ export function runtime(env: NodeJS.ProcessEnv = Bun.env): Runtime {
     ffmpeg: env.FFMPEG_PATH || 'ffmpeg',
     ffprobe: env.FFPROBE_PATH || 'ffprobe',
     toneMapBackend: z.enum(['cpu', 'gpu']).parse(env.TONEMAP_BACKEND || 'cpu'),
+    decodeBackend: z.enum(['cpu', 'vulkan']).parse(env.DECODE_BACKEND || 'cpu'),
+    vulkanDevice: env.VULKAN_DEVICE || '0',
     toneMapThreads: z.coerce
       .number()
       .int()

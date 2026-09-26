@@ -130,6 +130,9 @@ export function isHdr(video: Stream): boolean {
 }
 export interface Plan {
   args: string[];
+  decoder: 'cpu' | 'vulkan';
+  decodeReason?: string;
+  softwareArgs?: string[];
   expected: Stream[];
   height?: number;
   width?: number;
@@ -275,6 +278,7 @@ export function makePlan(
   );
   return {
     args,
+    decoder: 'cpu',
     expected,
     ...dimensions,
     needsCrop: Boolean(settings.crop && !crop),
