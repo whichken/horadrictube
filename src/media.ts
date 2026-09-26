@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { availableParallelism } from 'node:os';
 import type { Config, Profile, Runtime } from './config.ts';
 import { run } from './process.ts';
 import { SkipError } from './log.ts';
@@ -209,10 +210,10 @@ export function makePlan(
     String(settings.crf),
     '-preset:v:0',
     settings.preset!,
-    '-threads:v:0',
-    String(config.threads),
+    // x265's native NUMA detection can produce no pool inside Docker. Use
+    // the process's available CPUs instead; keep frame-thread selection auto.
     '-x265-params',
-    `pools=${config.threads}:frame-threads=1`,
+    `pools=${availableParallelism()}`,
     '-pix_fmt:v:0',
     'yuv420p10le',
   );

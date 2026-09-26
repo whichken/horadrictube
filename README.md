@@ -50,7 +50,7 @@ Keep webhook routes on your local network or behind your authenticated reverse p
 - A completed file is probed, checked for expected codec/dimensions/duration/track counts, and fully decoded for audio/video errors. The source must remain unchanged throughout encoding.
 - By default the output must be at least 5% smaller. Larger or insufficiently smaller encodes are discarded and recorded as skipped.
 - Existing destinations are never overwritten, even if another process creates one during encoding. Publishing copies to a hidden file in the destination directory, flushes it, and atomically links it to the final name. The destination filesystem must support hard links (normal Unraid/Linux media filesystems do).
-- Audio conversion, cropping, arbitrary ffmpeg arguments, tone-mapping backend, and HDR preservation are not inferred by AI. This version supports the explicit settings below; automatic cropping and the old per-stream rules are no longer supported.
+- Audio conversion, cropping, arbitrary ffmpeg arguments, tone-mapping backend, and HDR preservation are not inferred by AI. This version supports the explicit crop and per-stream rules documented below.
 
 ### CPU or GPU tone mapping, one image
 
@@ -109,7 +109,7 @@ container, **not rebuilding the image**. To convert HEVC HDR sources, also set
 This covers HDR10/PQ, HLG, and the Dolby Vision cases below on supported Linux
 Vulkan stacks; it does not make every GPU/driver compatible. CPU rendering competes with
 x265 for cores: `TONEMAP_THREADS` controls Lavapipe's thread count independently
-of the config's x265 `threads` setting. GPU mode lets libplacebo choose among the
+of x265's automatic threading. GPU mode lets libplacebo choose among the
 hardware devices exposed to the container. Current defaults match the comparison:
 Spline, peak detection on, smoothing period 20, and contrast recovery off.
 
@@ -150,7 +150,6 @@ A basic example is in [`config.example.json`](config.example.json). [`config.ser
 | --- | --- | --- |
 | `version` | `2` | Version 2 format; unversioned legacy profile files are adapted in memory |
 | `concurrency` | `1` | Simultaneous encodes (1–16) |
-| `threads` | `2` | x265 thread pool size per encode; other ffmpeg stages may use additional threads |
 | `defaultProfile` | `default` | Profile for ordinary requests and AI fallback |
 | `suffix` | ` HEVC` | Appended to the source stem; must end in HEVC and contain no path separators |
 | `pathMappings` | `[]` | Remote webhook paths → local media paths |
@@ -162,6 +161,27 @@ A basic example is in [`config.example.json`](config.example.json). [`config.ser
 | `maxQueuedJobs` | `10000` | Queue admission limit for pending/running jobs |
 
 Each profile accepts `description`, `crf` (0–40), `preset`, `maxHeight` (144–4320 or `null`), `maxWidth` (2–16384 or `null`), `audio` (`copy` or `aac`), `audioBitrate` (64–512 kbps), `hdr` (`skip` or `tonemap`), and `delaySeconds`. Width/height limits preserve aspect ratio and never upscale. Optional `selection`, `encoder`, `fileRenames`, and per-profile `pathMappings` implement the server rules described below. `extension` accepts `mkv`. Output is always Matroska (`.mkv`) to retain supported subtitle/audio formats. Unsupported streams/muxing combinations fail visibly; selected tracks are not silently dropped. Attached cover art and data streams are omitted; multiple main video streams are skipped.
+
+### Encoding threads
+
+Encoder threading is automatic and has no config knobs. The app sizes the x265
+worker pool using Bun's `node:os` `availableParallelism()` (which follows the
+process's CPU affinity), and x265 chooses how many frames to encode concurrently.
+We pass the detected pool size because x265's native NUMA detection produced no
+worker pool in the Unraid container. We do not pass `-threads:v` or
+`frame-threads` for queued encodes.
+
+Control CPU allocation through Docker CPU pinning/quotas; `concurrency` still
+controls how many jobs run at once. A CPU-time quota limits runtime consumption
+but may not reduce the detected worker count. Neither worker count nor automatic
+frame threading guarantees full utilization of every allocated CPU.
+
+Old version 2 `threads` and `frameThreads` fields are ignored when loading a
+config and can be removed. They no longer restrict encoding performance.
+`TONEMAP_THREADS` remains separate: it controls only CPU-based Lavapipe filtering
+and has no effect on SDR encodes. The tiny `--check-media` startup test deliberately
+uses one pool/frame thread for its two synthetic frames; queued encodes use the
+automatic settings.
 
 ### Stream selection and ordered encoding rules
 

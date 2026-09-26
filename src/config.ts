@@ -54,7 +54,6 @@ export const configSchema = z
   .strictObject({
     version: z.literal(2),
     concurrency: z.number().int().min(1).max(16).default(1),
-    threads: z.number().int().min(1).max(64).default(2),
     suffix: z
       .string()
       .regex(/^ [a-zA-Z0-9 _-]*HEVC$/)
@@ -181,7 +180,12 @@ export async function loadConfig(rt: Runtime, env: NodeJS.ProcessEnv = Bun.env):
 // Legacy files are adapted in memory only; never rewrite a server's configuration.
 export function normalizeConfig(input: unknown): Record<string, unknown> {
   const root = z.record(z.string(), z.unknown()).parse(input);
-  if (root.version !== undefined) return root;
+  if (root.version !== undefined) {
+    // Retire the old encoder thread overrides on load. CPU availability now
+    // determines pool sizing; x265 automatically chooses frame threading.
+    const { threads: _threads, frameThreads: _frameThreads, ...config } = root;
+    return config;
+  }
   const legacy = z
     .strictObject({ profiles: z.record(z.string(), z.record(z.string(), z.unknown())) })
     .parse(root);

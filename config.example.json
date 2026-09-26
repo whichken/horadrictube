@@ -1,7 +1,6 @@
 {
   "version": 2,
   "concurrency": 1,
-  "threads": 2,
   "suffix": " HEVC",
   "defaultProfile": "default",
   "pathMappings": [],
