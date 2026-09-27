@@ -5,6 +5,7 @@ import legacy from '../fixtures/server-profiles.v1.json';
 import { configSchema, normalizeConfig } from '../../src/config.ts';
 import { run } from '../../src/process.ts';
 import { probe, validateOutput } from '../../src/media.ts';
+import { toneMappingEnvironment } from '../../src/tonemap.ts';
 import { createPlan, detectCrop } from '../../src/planner.ts';
 import { Store } from '../../src/store.ts';
 import { Worker } from '../../src/worker.ts';
@@ -268,7 +269,7 @@ test('wide source is limited by width, and HDR crop runs before Spline tone mapp
   const media = await probe(source, f.rt),
     output = join(f.root, 'wide.mkv');
   const plan = await createPlan(media, profile, config, source, output, f.rt);
-  await run('ffmpeg', plan.args, { timeoutMs: 15000 });
+  await run('ffmpeg', plan.args, { timeoutMs: 30000, env: await toneMappingEnvironment(f.rt) });
   const result = await probe(output, f.rt);
   validateOutput(media, result, plan);
   expect([result.streams[0]!.width, result.streams[0]!.height]).toEqual([1920, 810]);
@@ -294,7 +295,6 @@ test('wide source is limited by width, and HDR crop runs before Spline tone mapp
   );
   const hdrMedia = await probe(hdr, f.rt);
   const hdrPlan = await createPlan(hdrMedia, profile, config, hdr, sdr, f.rt);
-  const { toneMappingEnvironment } = await import('../../src/tonemap.ts');
   await run('ffmpeg', hdrPlan.args, { timeoutMs: 60000, env: await toneMappingEnvironment(f.rt) });
   const sdrMedia = await probe(sdr, f.rt);
   validateOutput(hdrMedia, sdrMedia, hdrPlan);

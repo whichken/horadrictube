@@ -1,4 +1,4 @@
-import { usesToneMapping } from './config.ts';
+import { usesVulkanFiltering } from './config.ts';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runtime, loadConfig } from './config.ts';
@@ -23,8 +23,8 @@ async function main(): Promise<void> {
   await run(rt.ffprobe, ['-version'], { timeoutMs: 10000 });
   const encoders = await run(rt.ffmpeg, ['-hide_banner', '-encoders'], { timeoutMs: 10000 });
   if (!encoders.includes('libx265')) throw new Error('ffmpeg must include the libx265 encoder');
-  if (Object.values(config.profiles).some(usesToneMapping))
-    log('tonemap.ready', await checkToneMapping(rt));
+  if (Object.values(config.profiles).some(usesVulkanFiltering))
+    log('vulkan.ready', await checkToneMapping(rt));
   const store = new Store(join(rt.configDir, 'jobs.sqlite'));
   const worker = new Worker(store, config, rt);
   let app: ReturnType<typeof createApp>;

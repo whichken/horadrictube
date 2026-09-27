@@ -176,7 +176,7 @@ test('width limit, crop before scale, no upscaling, and HDR rules respect source
   expect(p.height).toBe(720);
   expect(p.width).toBe(1920);
   expect(p.args[p.args.indexOf('-filter:v:0') + 1]).toStartWith(
-    'crop=3840:1440:0:80,scale=1920:720',
+    'crop=3840:1440:0:80,libplacebo=w=1920:h=720:downscaler=hermite',
   );
   const small = plan(
     'default',

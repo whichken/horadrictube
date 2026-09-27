@@ -46,20 +46,25 @@ test('HDR hardware plan shares the device, crops on GPU and downloads only after
   expect(check).not.toContain('out');
 });
 
-test.each(['yuv420p', 'yuv420p10le'])('SDR %s preserves CPU filters and bit depth', (pix_fmt) => {
-  const sdr: Media = {
-    ...media,
-    streams: [{ ...media.streams[0]!, pix_fmt, color_transfer: 'bt709' }],
-  };
-  const cpu = makePlan(sdr, profile, config, 'in', 'out', 'cpu');
-  const hw = vulkanCandidate(cpu, sdr, { ...rt, toneMapBackend: 'cpu' });
-  expect(hw.decoder).toBe('vulkan');
-  const filter = hw.args[hw.args.indexOf('-filter:v:0') + 1]!;
-  expect(filter).toStartWith(
-    `hwdownload,format=${pix_fmt === 'yuv420p' ? 'nv12' : 'p010le'},format=${pix_fmt},`,
-  );
-  expect(filter).toEndWith(cpu.args[cpu.args.indexOf('-filter:v:0') + 1]!);
-});
+test.each(['yuv420p', 'yuv420p10le'])(
+  'unscaled SDR %s preserves bit depth on download',
+  (pix_fmt) => {
+    const sdr: Media = {
+      ...media,
+      streams: [
+        { ...media.streams[0]!, pix_fmt, width: 640, height: 360, color_transfer: 'bt709' },
+      ],
+    };
+    const cpu = makePlan(sdr, profile, config, 'in', 'out', 'cpu');
+    const hw = vulkanCandidate(cpu, sdr, { ...rt, toneMapBackend: 'cpu' });
+    expect(hw.decoder).toBe('vulkan');
+    const filter = hw.args[hw.args.indexOf('-filter:v:0') + 1]!;
+    expect(filter).toStartWith(
+      `hwdownload,format=${pix_fmt === 'yuv420p' ? 'nv12' : 'p010le'},format=${pix_fmt},`,
+    );
+    expect(filter).toEndWith(cpu.args[cpu.args.indexOf('-filter:v:0') + 1]!);
+  },
+);
 
 test('CPU default, unsupported formats and CPU HDR remain software decoded', () => {
   expect(runtime({}).decodeBackend).toBe('cpu');
@@ -84,4 +89,25 @@ test('Profile 5 retains CPU decoding and its configured tone mapping', () => {
   expect(candidate.decoder).toBe('cpu');
   expect(candidate.args).toEqual(source.args);
   expect(candidate.decodeReason).toContain('Profile 5');
+});
+
+test('SDR resize keeps frames on Vulkan through crop and Hermite, with a CPU decode fallback', () => {
+  const sdr: Media = { ...media, streams: [{ ...media.streams[0]!, color_transfer: 'bt709' }] };
+  const cpu = makePlan(sdr, profile, config, 'in', 'out', 'gpu', {
+    width: 3840,
+    height: 1600,
+    x: 0,
+    y: 280,
+  });
+  const hw = vulkanCandidate(cpu, sdr, rt);
+  expect(hw.decoder).toBe('vulkan');
+  const filter = hw.args[hw.args.indexOf('-filter:v:0') + 1]!;
+  expect(filter).toStartWith(
+    'libplacebo=crop_w=3840:crop_h=1600:crop_x=0:crop_y=280:w=2592:h=1080:downscaler=hermite',
+  );
+  expect(filter).toContain('format=yuv420p10le,hwdownload,format=yuv420p10le,');
+  expect(filter).not.toContain('tonemapping=');
+  expect(hw.softwareArgs).toEqual(cpu.args);
+  expect(cpu.args.join(' ')).toContain('downscaler=hermite');
+  expect(vulkanCandidate(cpu, sdr, { ...rt, toneMapBackend: 'cpu' }).decoder).toBe('cpu');
 });

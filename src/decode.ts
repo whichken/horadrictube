@@ -17,8 +17,10 @@ export function vulkanCandidate(plan: Plan, media: Media, rt: Runtime): Plan {
     return cpu('Codec is outside the Vulkan decoding candidates');
   if (!['yuv420p', 'yuv420p10le'].includes(video.pix_fmt ?? ''))
     return cpu('Pixel format is outside the Vulkan decoding candidates');
-  if (plan.hdr && rt.toneMapBackend !== 'gpu')
-    return cpu('HDR Vulkan decoding requires GPU tone mapping on the same device');
+  if (plan.vulkanFiltering && rt.toneMapBackend !== 'gpu')
+    return cpu(
+      'Vulkan decoding with scaling or tone mapping requires GPU filtering on the same device',
+    );
 
   const args = [...plan.args];
   const input = args.indexOf('-i');
@@ -45,8 +47,8 @@ export function vulkanCandidate(plan: Plan, media: Media, rt: Runtime): Plan {
   );
   const filterIndex = args.indexOf('-filter:v:0') + 1;
   let filter = args[filterIndex]!;
-  if (plan.hdr) {
-    // libplacebo can crop the hardware frames directly before tone mapping.
+  if (plan.vulkanFiltering) {
+    // libplacebo crops and scales hardware frames before downloading for x265.
     // Other preceding filters (sidedata/setparams) change metadata only.
     const crop = /^crop=(\d+):(\d+):(\d+):(\d+),/.exec(filter);
     if (crop) {
@@ -62,8 +64,7 @@ export function vulkanCandidate(plan: Plan, media: Media, rt: Runtime): Plan {
       'format=yuv420p10le,hwdownload,format=yuv420p10le,',
     );
   } else {
-    // Download without losing bit depth; retain the existing CPU scaling/crop
-    // algorithms so opting into decode doesn't change SDR image processing.
+    // No resize/tone mapping: download without losing bit depth for crop/pad.
     const format = video.pix_fmt === 'yuv420p10le' ? 'p010le' : 'nv12';
     filter = `hwdownload,format=${format},format=${video.pix_fmt},${filter}`;
   }

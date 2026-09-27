@@ -46,20 +46,22 @@ Keep webhook routes on your local network or behind your authenticated reverse p
 - `compact`: CRF 26, slow preset, at most 720p; all audio tracks become AAC stereo at 192 kbps; HDR is tone-mapped to SDR.
 - Existing HEVC sources and names ending in the configured suffix are skipped by default. Set `skipHevc: false` to allow re-encoding HEVC originals.
 - HDR is **skipped by the default profile**. Set `profiles.default.hdr` to `"tonemap"` to create 1080p SDR companions from HDR10/HLG and supported Dolby Vision sources. This is a deliberate conversion, not HDR preservation.
-- All HDR conversion uses **libplacebo Spline**, perceptual gamut mapping, dynamic peak detection, and Lanczos downscaling. Output is 10-bit limited-range BT.709; HDR mastering/light-level metadata is removed. CPU and GPU modes use the same filter settings. The legacy Hable filter chain has been removed.
+- All HDR conversion uses **libplacebo Spline**, perceptual gamut mapping, dynamic peak detection, and Hermite downscaling. Output is 10-bit limited-range BT.709; HDR mastering/light-level metadata is removed. CPU and GPU modes use the same filter settings. The legacy Hable filter chain has been removed.
 - A completed file is probed, checked for expected codec/dimensions/duration/track counts, and fully decoded for audio/video errors. The source must remain unchanged throughout encoding.
 - By default the output must be at least 5% smaller. Larger or insufficiently smaller encodes are discarded and recorded as skipped.
 - Existing destinations are never overwritten, even if another process creates one during encoding. Publishing copies to a hidden file in the destination directory, flushes it, and atomically links it to the final name. The destination filesystem must support hard links (normal Unraid/Linux media filesystems do).
 - Audio conversion, cropping, arbitrary ffmpeg arguments, tone-mapping backend, and HDR preservation are not inferred by AI. This version supports the explicit crop and per-stream rules documented below.
 
-### CPU or GPU tone mapping, one image
+### CPU or GPU filtering, one image
 
 The main image includes FFmpeg/libplacebo, the Vulkan loader, and Mesa drivers for
 CPU (Lavapipe) and supported AMD/Intel GPUs. **`TONEMAP_BACKEND=cpu` is the default**;
 it requires no GPU passthrough. `TONEMAP_BACKEND=gpu` uses a hardware Vulkan GPU.
 Decoding defaults to CPU; optional Vulkan Video decoding is described below.
-libx265 encoding always remains on the CPU. With default decoding, only HDR
-filtering and scaling use Vulkan; SDR jobs do not initialize it.
+libx265 encoding always remains on the CPU. HDR tone mapping and all resizing
+use libplacebo on Vulkan, with Hermite downscaling. SDR resizing preserves the
+source color space, transfer and range. SDR jobs needing no resize skip libplacebo.
+`TONEMAP_BACKEND` selects the backend for both tone mapping and scaling.
 
 Build the updated image once, then validate or run CPU mode:
 
@@ -69,11 +71,11 @@ docker compose run --rm --no-deps horadrictube bun dist/index.js --check-media
 docker compose up -d
 ```
 
-`--check-media` runs a tiny synthetic HDR → Spline → 10-bit x265 encode, prints
+`--check-media` runs a tiny synthetic HDR → Spline/Hermite → 10-bit x265 encode, prints
 `media.check.passed` with the actual device name, and exits without opening the
 queue, changing config, or processing your media. Normal startup runs the same
-check if any configured profile enables tone mapping. Missing filters/drivers or
-GPU permissions stop startup with a useful error. GPU mode does **not** silently
+check if any configured profile enables tone mapping or resizing. Missing
+filters/drivers or GPU permissions stop startup with a useful error. GPU mode does **not** silently
 switch to CPU. CPU mode pins the Lavapipe driver even when a GPU is exposed.
 
 For **AMD/Intel**, use the included runtime override. Select your host's render
@@ -119,11 +121,12 @@ Spline, peak detection on, smoothing period 20, and contrast recovery off.
 ### Optional Vulkan Video decoding
 
 Set `DECODE_BACKEND=vulkan` with GPU access to try hardware decoding per file.
-For HDR, also set `TONEMAP_BACKEND=gpu`: decoding, cropping, scaling and Spline
-then share a Vulkan device, and only the resulting SDR frames return to CPU
-memory for libx265. SDR jobs download decoded frames at their original bit depth
-and keep the existing CPU crop/scale filters. Crop detection and output validation
-still use software decoding. No encoder or quality settings change.
+Set `TONEMAP_BACKEND=gpu` to keep decoding, cropping, Hermite scaling and any
+Spline tone mapping on one Vulkan device. Only the processed frames return to
+CPU memory for libx265. SDR jobs needing no resize download at the source bit
+depth and use CPU crop/pad filters. With `TONEMAP_BACKEND=cpu`, jobs requiring
+scaling or tone mapping also decode on CPU, then filter through Lavapipe.
+Crop detection and output validation still use software decoding.
 
 The initial candidates are H.264, HEVC and AV1 with 8/10-bit 4:2:0 pixels.
 The GPU/driver must support the actual codec, profile and resolution. Each job
@@ -131,7 +134,8 @@ first decodes up to 32 frames through its planned filter chain with a 30-second
 timeout. Unsupported hardware or a failing filter graph selects CPU decoding and
 logs the reason. If a selected Vulkan encode fails, its partial file is removed
 and the same job starts again with CPU decoding, within the remaining encode
-timeout. Tone mapping retains the explicitly configured backend on fallback.
+timeout. Scaling and tone mapping retain the explicitly configured backend on
+fallback.
 Cancellation does not trigger a fallback or another encode.
 
 Dolby Vision Profile 5 uses CPU decoding with the configured CPU or GPU
@@ -232,8 +236,8 @@ frame threading guarantees full utilization of every allocated CPU.
 Old version 2 `threads` and `frameThreads` fields are ignored when loading a
 config and can be removed. They no longer restrict encoding performance.
 `TONEMAP_THREADS` remains separate: it controls only CPU-based Lavapipe filtering
-and has no effect on SDR encodes. The tiny `--check-media` startup test deliberately
-uses one pool/frame thread for its two synthetic frames; queued encodes use the
+for both SDR resizing and HDR conversion; GPU mode ignores it. The tiny
+`--check-media` startup test deliberately uses one pool/frame thread for its two synthetic frames; queued encodes use the
 automatic settings.
 
 ### Stream selection and ordered encoding rules
@@ -260,10 +264,10 @@ In the advanced configuration example, `default` uses **EAC3 384k/5.1** for prim
 | `TRANSCODE_DIR` | `./transcode` (`/transcode` in Docker) | Encoding scratch space |
 | `CONCURRENCY` | Config value | Optional concurrency override |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | `ffmpeg`, `ffprobe` | Executable paths |
-| `TONEMAP_BACKEND` | `cpu` | `cpu` (Lavapipe) or `gpu` (hardware Vulkan); no silent fallback |
-| `TONEMAP_THREADS` | `2` | Lavapipe threads per tone-mapping process, 1–64; independent of x265 |
+| `TONEMAP_BACKEND` | `cpu` | `cpu` (Lavapipe) or `gpu` (hardware Vulkan) for scaling and tone mapping; no silent fallback |
+| `TONEMAP_THREADS` | `2` | Lavapipe threads per filtering process, 1–64; independent of x265 |
 | `DECODE_BACKEND` | `cpu` | `cpu` or opt-in `vulkan`, with per-file preflight and CPU fallback |
-| `VULKAN_DEVICE` | `0` | Vulkan decoding device index or name substring; shared with GPU Spline |
+| `VULKAN_DEVICE` | `0` | Vulkan decoding device index or name substring; shared with GPU scaling/tone mapping |
 | `VULKAN_CPU_ICD` | Auto-detected | Optional absolute path to Lavapipe's ICD JSON for native/custom installations |
 | `API_KEY` | Unset | Bearer token, X-API-Key, or Basic Auth password |
 | `TYPESAFE_API_KEY` | Unset | Optional server-side TypeSafe credential |
@@ -321,7 +325,7 @@ Legacy `/sonarr/:profile`, `/radarr/:profile`, and `/manual/:profile` URLs remai
 
 Bun 1.4.2 is pinned in `.bun-version`, `package.json`, Docker, and CI. The application uses `Bun.serve` for HTTP, `Bun.spawn` for ffmpeg, `bun:sqlite` for durable jobs, `Bun.file`/`Bun.write` for file data, and `bun:test` for tests. Directory operations, file identity checks, exclusive opens, hard links, and fsync use Bun's `node:fs` compatibility API because the corresponding operations are not exposed by `Bun.file`. No Node runtime is required.
 
-Requires Bun **1.4.2+** and ffmpeg/ffprobe with libx265. Tone mapping additionally requires a libplacebo build with Spline/perceptual gamut mapping and a working Vulkan backend. The Docker image uses Debian 13 (trixie) FFmpeg/Mesa packages. Native CPU mode needs `mesa-vulkan-drivers` (Debian/Ubuntu) or `vulkan-swrast` (Arch); native GPU mode needs a compatible Vulkan driver and `TONEMAP_BACKEND=gpu`. Verify with `bun src/index.ts --check-media`.
+Requires Bun **1.4.2+** and ffmpeg/ffprobe with libx265. Resizing and tone mapping additionally require a libplacebo build with Spline/perceptual gamut mapping and a working Vulkan backend. The Docker image uses Debian 13 (trixie) FFmpeg/Mesa packages. Native CPU mode needs `mesa-vulkan-drivers` (Debian/Ubuntu) or `vulkan-swrast` (Arch); native GPU mode needs a compatible Vulkan driver and `TONEMAP_BACKEND=gpu`. Verify with `bun src/index.ts --check-media`.
 
 ```bash
 bun install --frozen-lockfile

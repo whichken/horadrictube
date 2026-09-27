@@ -110,7 +110,7 @@ export class Worker {
       const deadline = Date.now() + config.encodeTimeoutSeconds * 1000;
       const encode = async (args: string[]) => {
         await run(rt.ffmpeg, args, {
-          env: plan.hdr ? await toneMappingEnvironment(rt) : undefined,
+          env: plan.vulkanFiltering ? await toneMappingEnvironment(rt) : undefined,
           signal,
           timeoutMs: Math.max(1, deadline - Date.now()),
           onLine: (line) => {

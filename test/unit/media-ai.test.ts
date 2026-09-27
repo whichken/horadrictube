@@ -29,13 +29,15 @@ test('planner selects real video, targets 1080p and preserves audio/subtitles/at
   expect(plan.height).toBe(1080);
   expect(plan.args.includes('0:1')).toBeTruthy();
   expect(!plan.args.includes('0:0')).toBeTruthy();
-  expect(plan.args.some((arg) => arg.includes('scale=1920:1080'))).toBeTruthy();
+  expect(
+    plan.args.some((arg) => arg.includes('libplacebo=w=1920:h=1080:downscaler=hermite')),
+  ).toBeTruthy();
   expect(plan.expected.length).toBe(4);
   const small = structuredClone(media);
   small.streams[1]!.height = 720;
   expect(
     !makePlan(small, defaultConfig.profiles.default!, defaultConfig, 'in', 'out').args.some((arg) =>
-      arg.includes('scale='),
+      arg.includes('libplacebo='),
     ),
   ).toBeTruthy();
   const hdr = structuredClone(media);

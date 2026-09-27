@@ -13,7 +13,7 @@ export function toneMappingDeviceArgs(backend: Runtime['toneMapBackend']): strin
 export function splineFilter(width: number, height: number, applyDolbyVision = true): string {
   return [
     `libplacebo=w=${width}:h=${height}`,
-    'downscaler=lanczos',
+    'downscaler=hermite',
     'tonemapping=spline',
     `apply_dolbyvision=${applyDolbyVision ? 1 : 0}`,
     'gamut_mode=perceptual',
@@ -24,6 +24,17 @@ export function splineFilter(width: number, height: number, applyDolbyVision = t
     'color_primaries=bt709',
     'color_trc=bt709',
     'range=tv',
+    'format=yuv420p10le',
+  ].join(':');
+}
+
+export function scalingFilter(width: number, height: number): string {
+  // Leave color space, transfer and range at their input values for SDR.
+  return [
+    `libplacebo=w=${width}:h=${height}`,
+    'downscaler=hermite',
+    'apply_dolbyvision=0',
+    'peak_detect=0',
     'format=yuv420p10le',
   ].join(':');
 }
@@ -53,9 +64,9 @@ export async function toneMappingEnvironment(rt: Runtime): Promise<NodeJS.Proces
   }
   if (!icd || !(await Bun.file(icd).exists()))
     throw new Error(
-      'CPU tone mapping requires Mesa Lavapipe. Install mesa-vulkan-drivers (vulkan-swrast on Arch), or set VULKAN_CPU_ICD to its lvp_icd JSON.',
+      'CPU Vulkan filtering requires Mesa Lavapipe. Install mesa-vulkan-drivers (vulkan-swrast on Arch), or set VULKAN_CPU_ICD to its lvp_icd JSON.',
     );
-  // Override inherited GPU selection only for the child doing CPU tone mapping.
+  // Override inherited GPU selection only for the child doing CPU filtering.
   return {
     ...Bun.env,
     VK_DRIVER_FILES: resolve(icd),

@@ -7,6 +7,7 @@ import { selectDecodePlan, vulkanCandidate } from '../../src/decode.ts';
 import { run } from '../../src/process.ts';
 import { Worker } from '../../src/worker.ts';
 import { Store } from '../../src/store.ts';
+import { toneMappingEnvironment } from '../../src/tonemap.ts';
 
 async function sample(path: string, hdr = false, crf = 0) {
   await run(
@@ -35,33 +36,49 @@ async function sample(path: string, hdr = false, crf = 0) {
   );
 }
 
-test('a missing Vulkan device falls back to a real CPU encode', async () => {
-  const f = await fixture();
-  try {
-    const source = join(f.rt.dataDir, 'source.mkv'),
-      output = join(f.rt.outDir, 'output.mkv');
-    await sample(source);
-    const media = await probe(source, f.rt);
-    const profile = { ...f.config.profiles.default!, preset: 'ultrafast' as const };
-    const cpu = makePlan(media, profile, f.config, source, output);
-    const plan = await selectDecodePlan(cpu, media, {
-      ...f.rt,
-      decodeBackend: 'vulkan',
-      vulkanDevice: 'nonexistent-horadrictube-device',
-    });
-    expect(plan.decoder).toBe('cpu');
-    expect(plan.decodeReason).toContain('preflight failed');
-    await run(f.rt.ffmpeg, plan.args, { timeoutMs: 15000 });
-    validateOutput(media, await probe(output, f.rt), plan);
-    const controller = new AbortController();
-    controller.abort();
-    await expect(
-      selectDecodePlan(cpu, media, { ...f.rt, decodeBackend: 'vulkan' }, controller.signal),
-    ).rejects.toThrow();
-  } finally {
-    await f.cleanup();
-  }
-}, 30000);
+test.each([false, true])(
+  'CPU decode fallback completes an encode (resize=%s)',
+  async (resize) => {
+    const f = await fixture();
+    try {
+      const source = join(f.rt.dataDir, 'source.mkv'),
+        output = join(f.rt.outDir, 'output.mkv');
+      await sample(source);
+      const media = await probe(source, f.rt);
+      const profile = {
+        ...f.config.profiles.default!,
+        preset: 'ultrafast' as const,
+        maxHeight: resize ? 144 : 1080,
+      };
+      const cpu = makePlan(media, profile, f.config, source, output, f.rt.toneMapBackend);
+      const plan = await selectDecodePlan(cpu, media, {
+        ...f.rt,
+        decodeBackend: 'vulkan',
+        vulkanDevice: 'nonexistent-horadrictube-device',
+      });
+      expect(plan.decoder).toBe('cpu');
+      const requiresCpuFiltering = resize && f.rt.toneMapBackend === 'cpu';
+      expect(plan.decodeReason).toContain(
+        requiresCpuFiltering ? 'same device' : 'preflight failed',
+      );
+      if (resize) expect(plan.args.join(' ')).toContain('downscaler=hermite');
+      await run(f.rt.ffmpeg, plan.args, {
+        timeoutMs: 30000,
+        env: plan.vulkanFiltering ? await toneMappingEnvironment(f.rt) : undefined,
+      });
+      validateOutput(media, await probe(output, f.rt), plan);
+      const controller = new AbortController();
+      controller.abort();
+      if (!requiresCpuFiltering)
+        await expect(
+          selectDecodePlan(cpu, media, { ...f.rt, decodeBackend: 'vulkan' }, controller.signal),
+        ).rejects.toThrow();
+    } finally {
+      await f.cleanup();
+    }
+  },
+  30000,
+);
 
 test('a Vulkan failure after preflight discards partial output and retries CPU in the same job', async () => {
   const f = await fixture();

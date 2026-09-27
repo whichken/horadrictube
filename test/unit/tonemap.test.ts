@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { runtime, defaultConfig } from '../../src/config.ts';
+import { runtime, defaultConfig, usesVulkanFiltering } from '../../src/config.ts';
 import { makePlan, type Media } from '../../src/media.ts';
 import { checkToneMapping, toneMappingEnvironment } from '../../src/tonemap.ts';
 
@@ -26,6 +26,7 @@ test('CPU and GPU plans share Spline and dimensions but only CPU imports a softw
   expect(gpu.args[gpu.args.indexOf('-filter:v:0') + 1]).toBe(cpuFilter);
   expect(cpuFilter).toContain('w=1920:h=1080');
   expect(cpuFilter).toContain('tonemapping=spline');
+  expect(cpuFilter).toContain('downscaler=hermite');
   expect(cpuFilter).toContain('CONTENT_LIGHT_LEVEL');
   media.streams[0]!.height = 360;
   media.streams[0]!.width = 640;
@@ -94,4 +95,27 @@ test('Dolby Vision chooses color-safe conversion from its profile and base compa
   expect(plan).toThrow(/Unsupported Dolby Vision/);
   record.dv_profile = 20;
   expect(plan).toThrow(/Unsupported Dolby Vision/);
+});
+
+test('SDR scaling uses the configured Vulkan backend, without forcing HDR color conversion', () => {
+  const media: Media = {
+    format: {},
+    streams: [{ index: 0, codec_type: 'video', codec_name: 'h264', width: 3840, height: 2160 }],
+  };
+  const profile = defaultConfig.profiles.default!;
+  for (const backend of ['cpu', 'gpu'] as const) {
+    const plan = makePlan(media, profile, defaultConfig, 'in', 'out', backend);
+    expect(plan.vulkanFiltering).toBe(true);
+    expect(plan.hdr).toBe(false);
+    expect(plan.args.includes('-init_hw_device')).toBe(backend === 'cpu');
+    const filter = plan.args[plan.args.indexOf('-filter:v:0') + 1]!;
+    expect(filter).toContain('libplacebo=w=1920:h=1080:downscaler=hermite');
+    expect(filter).not.toMatch(/tonemapping=|color_trc=|colorspace=|range=/);
+  }
+  expect(usesVulkanFiltering(profile)).toBe(true);
+  const unscaled = { ...profile, maxWidth: null, maxHeight: null };
+  expect(usesVulkanFiltering(unscaled)).toBe(false);
+  expect(
+    usesVulkanFiltering({ ...unscaled, encoder: [{ type: 'video', result: { size: '1920:-2' } }] }),
+  ).toBe(true);
 });

@@ -229,3 +229,12 @@ export function usesToneMapping(profile: Profile): boolean {
     Boolean(profile.encoder?.some((rule) => rule.type === 'video' && rule.result.tonemap))
   );
 }
+
+export function usesVulkanFiltering(profile: Profile): boolean {
+  return (
+    usesToneMapping(profile) ||
+    profile.maxWidth !== null ||
+    profile.maxHeight !== null ||
+    Boolean(profile.encoder?.some((rule) => rule.type === 'video' && rule.result.size))
+  );
+}

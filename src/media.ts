@@ -4,7 +4,7 @@ import type { Config, Profile, Runtime } from './config.ts';
 import { run } from './process.ts';
 import { SkipError } from './log.ts';
 import { encoding, facts, selectTracks, type EncoderSettings } from './rules.ts';
-import { splineFilter, stripHdrMetadata, toneMappingDeviceArgs } from './tonemap.ts';
+import { scalingFilter, splineFilter, stripHdrMetadata, toneMappingDeviceArgs } from './tonemap.ts';
 
 const streamSchema = z.object({
   index: z.number().int().nonnegative(),
@@ -140,6 +140,7 @@ export interface Plan {
   audio: { codec: string; channels?: number; primary?: boolean }[];
   subtitles: { primary?: boolean; forced: boolean }[];
   hdr: boolean;
+  vulkanFiltering: boolean;
   dolbyVision: DolbyMode;
 }
 export function makePlan(
@@ -188,13 +189,21 @@ export function makePlan(
       },
     ),
   );
+  const dimensions = outputDimensions(video, profile, settings, crop);
+  const resize = Boolean(
+    dimensions.width &&
+    dimensions.height &&
+    (dimensions.width !== Math.ceil((crop?.width ?? video.width ?? dimensions.width) / 2) * 2 ||
+      dimensions.height !== Math.ceil((crop?.height ?? video.height ?? dimensions.height) / 2) * 2),
+  );
+  const vulkanFiltering = hdr || resize;
   const args = [
     '-hide_banner',
     '-nostdin',
     '-v',
     'warning',
     '-n',
-    ...(hdr ? toneMappingDeviceArgs(backend) : []),
+    ...(vulkanFiltering ? toneMappingDeviceArgs(backend) : []),
     ...(dolbyVision === 'reshape' ? ['-xerror', '-err_detect', 'explode'] : []),
     '-i',
     source,
@@ -222,7 +231,6 @@ export function makePlan(
   );
   const filters: string[] = [];
   if (crop) filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`);
-  const dimensions = outputDimensions(video, profile, settings, crop);
   if (hdr) {
     if (!dimensions.width || !dimensions.height)
       throw new Error('HDR source dimensions are missing');
@@ -234,13 +242,7 @@ export function makePlan(
         `setparams=range=limited:color_primaries=bt2020:color_trc=${dolbyVision === 'hlg-base' ? 'arib-std-b67' : 'smpte2084'}:colorspace=bt2020nc`,
       );
     filters.push(splineFilter(dimensions.width, dimensions.height, !baseLayer), stripHdrMetadata);
-  } else if (
-    dimensions.width &&
-    dimensions.height &&
-    (dimensions.width !== Math.ceil((crop?.width ?? video.width ?? dimensions.width) / 2) * 2 ||
-      dimensions.height !== Math.ceil((crop?.height ?? video.height ?? dimensions.height) / 2) * 2)
-  )
-    filters.push(`scale=${dimensions.width}:${dimensions.height}:flags=lanczos`);
+  } else if (resize) filters.push(scalingFilter(dimensions.width!, dimensions.height!));
   // x265 requires even dimensions. Pad instead of stretching odd-sized sources.
   filters.push('pad=ceil(iw/2)*2:ceil(ih/2)*2');
   args.push('-filter:v:0', filters.join(','));
@@ -295,6 +297,7 @@ export function makePlan(
       forced: stream.disposition?.forced === 1,
     })),
     hdr,
+    vulkanFiltering,
     dolbyVision,
   };
 }
