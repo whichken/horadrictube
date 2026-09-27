@@ -138,7 +138,7 @@ export interface Plan {
   width?: number;
   needsCrop: boolean;
   audio: { codec: string; channels?: number; primary?: boolean }[];
-  subtitles: { primary?: boolean; forced: boolean }[];
+  subtitles: { codec?: string; primary?: boolean; forced: boolean }[];
   hdr: boolean;
   vulkanFiltering: boolean;
   dolbyVision: DolbyMode;
@@ -266,8 +266,12 @@ export function makePlan(
     }
     if (primary !== undefined) args.push(`-disposition:a:${i}`, disposition(stream, primary));
   }
-  for (const [i, { stream, primary }] of subtitles.entries())
+  for (const [i, { stream, primary }] of subtitles.entries()) {
+    // Matroska cannot mux MP4 timed text. Convert only those tracks; keep
+    // compatible text and bitmap subtitle formats on the stream-copy path.
+    if (stream.codec_name === 'mov_text') args.push(`-c:s:${i}`, 'srt');
     if (primary !== undefined) args.push(`-disposition:s:${i}`, disposition(stream, primary));
+  }
   args.push(
     '-max_muxing_queue_size',
     '4096',
@@ -293,6 +297,7 @@ export function makePlan(
       primary,
     })),
     subtitles: subtitles.map(({ stream, primary }) => ({
+      codec: stream.codec_name === 'mov_text' ? 'subrip' : stream.codec_name,
       primary,
       forced: stream.disposition?.forced === 1,
     })),
@@ -330,6 +335,8 @@ export function validateOutput(source: Media, output: Media, plan: Plan): void {
   }
   for (const [i, expected] of plan.subtitles.entries()) {
     const track = output.streams.filter((s) => s.codec_type === 'subtitle')[i];
+    if (expected.codec && track?.codec_name !== expected.codec)
+      throw new Error('Output subtitle codec does not match the planned codec');
     if (
       !track ||
       Boolean(track.disposition?.forced) !== expected.forced ||

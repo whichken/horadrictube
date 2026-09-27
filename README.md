@@ -2,7 +2,7 @@
 
 A self-hosted Sonarr/Radarr webhook service that creates smaller HEVC companions for Plex. Originals stay untouched. A file named `Movie.mkv` becomes `Movie HEVC.mkv` in the same directory.
 
-Version 2 is a complete rewrite: Bun 1.4.2, strict TypeScript, built-in SQLite, and direct ffmpeg processes. No Redis, external database, or AI subscription is required. The default profile targets **1080p maximum**, never upscales, and copies every audio track, subtitle, and attachment. Optional TypeSafe Jev selects among your configured profiles.
+Version 2 is a complete rewrite: Bun 1.4.2, strict TypeScript, built-in SQLite, and direct ffmpeg processes. No Redis, external database, or AI subscription is required. The default profile targets **1080p maximum**, never upscales, and retains every audio track, subtitle, and attachment. MP4 timed-text subtitles are converted to SRT for MKV compatibility; other subtitle formats are copied. Optional TypeSafe Jev selects among your configured profiles.
 
 ## Run on Unraid / Docker
 
@@ -42,7 +42,7 @@ Keep webhook routes on your local network or behind your authenticated reverse p
 
 ## Encoding behavior
 
-- `default`: libx265, CRF 24, medium preset, at most 1080p, 10-bit output. All audio/subtitles/attachments and global metadata/chapters are copied. Lower resolution sources retain their size (odd dimensions are padded to even values).
+- `default`: libx265, CRF 24, medium preset, at most 1080p, 10-bit output. All audio/subtitle/attachment tracks and global metadata/chapters are retained. MP4 `mov_text` subtitles are converted to SRT; other subtitle formats are copied. Lower resolution sources retain their size (odd dimensions are padded to even values).
 - `compact`: CRF 26, slow preset, at most 720p; all audio tracks become AAC stereo at 192 kbps; HDR is tone-mapped to SDR.
 - Existing HEVC sources and names ending in the configured suffix are skipped by default. Set `skipHevc: false` to allow re-encoding HEVC originals.
 - HDR is **skipped by the default profile**. Set `profiles.default.hdr` to `"tonemap"` to create 1080p SDR companions from HDR10/HLG and supported Dolby Vision sources. This is a deliberate conversion, not HDR preservation.
@@ -217,7 +217,7 @@ A basic example is in [`config.example.json`](config.example.json). [`config.ser
 | `encodeTimeoutSeconds` | `86400` | Timeout for each encode and full-decode validation |
 | `maxQueuedJobs` | `10000` | Queue admission limit for pending/running jobs |
 
-Each profile accepts `description`, `crf` (0–40), `preset`, `maxHeight` (144–4320 or `null`), `maxWidth` (2–16384 or `null`), `audio` (`copy` or `aac`), `audioBitrate` (64–512 kbps), `hdr` (`skip` or `tonemap`), and `delaySeconds`. Width/height limits preserve aspect ratio and never upscale. Optional `selection`, `encoder`, `fileRenames`, and per-profile `pathMappings` implement the server rules described below. `extension` accepts `mkv`. Output is always Matroska (`.mkv`) to retain supported subtitle/audio formats. Unsupported streams/muxing combinations fail visibly; selected tracks are not silently dropped. Attached cover art and data streams are omitted; multiple main video streams are skipped.
+Each profile accepts `description`, `crf` (0–40), `preset`, `maxHeight` (144–4320 or `null`), `maxWidth` (2–16384 or `null`), `audio` (`copy` or `aac`), `audioBitrate` (64–512 kbps), `hdr` (`skip` or `tonemap`), and `delaySeconds`. Width/height limits preserve aspect ratio and never upscale. Optional `selection`, `encoder`, `fileRenames`, and per-profile `pathMappings` implement the server rules described below. `extension` accepts `mkv`. Output is always Matroska (`.mkv`) to retain supported subtitle/audio formats. Selected MP4 `mov_text` subtitles are automatically converted to SRT in the same ffmpeg process; text and timing are retained, but some styling/positioning may be lost. Other selected subtitle codecs are copied. Unsupported streams/muxing combinations fail visibly; selected tracks are not silently dropped. Attached cover art and data streams are omitted; multiple main video streams are skipped.
 
 ### Encoding threads
 
@@ -244,7 +244,7 @@ automatic settings.
 
 The server example retains the original rule structure:
 
-- `selection.audio` and `selection.subtitle` each accept `primary`, `secondary`, and `allowSecondary`. The first source track matching any primary rule becomes primary. Audio falls back to the first available track; subtitles have no implicit primary. Primary tracks are mapped first and marked default; other selected tracks have default cleared. Forced and other existing dispositions are retained. Without a selection section for a track type, every track of that type is retained unchanged.
+- `selection.audio` and `selection.subtitle` each accept `primary`, `secondary`, and `allowSecondary`. The first source track matching any primary rule becomes primary. Audio falls back to the first available track; subtitles have no implicit primary. Primary tracks are mapped first and marked default; other selected tracks have default cleared. Forced and other existing dispositions are retained. Without a selection section for a track type, every track of that type is retained, with the subtitle compatibility conversion described above.
 - Secondary rules include **all** matching remaining tracks in source order, without duplicates. This matches the original engine, including `dual`'s non-English rule despite its old description saying "first". Add `"limit": 1` to that secondary rule to keep only its first match.
 - Rules match `language`, `title`, `forced`, `default`, `primary`, `codec`, `bitrate`, `channels`, `filename`, `width`, `height`, or `hdr`. Supported operators are `==`, `!=`, `>`, `>=`, `<`, `<=`, and case-insensitive `contains`. Clauses within a rule are ANDed. Missing metadata does not match a condition, including `!=`; missing audio bitrate therefore cannot trigger a copy shortcut. Bitrate uses ffprobe's stream value, then Matroska `BPS`/`BPS-eng` tags.
 - `encoder` rules are evaluated in order against the **original source metadata** and merged property by property. Later matching rules override earlier settings. Video supports `codec: "libx265"`, `crf`, `preset`, `crop`, `size`, and `tonemap`. Audio supports `copy`, `aac`, `ac3`, or `eac3`, plus `bitrate` and `channels`. Subtitle rules support `copy`. When a later rule selects `copy`, bitrate/channel conversion flags are omitted.
