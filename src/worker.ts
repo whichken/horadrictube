@@ -9,6 +9,7 @@ import { probe, validateOutput } from './media.ts';
 import { createPlan } from './planner.ts';
 import { toneMappingEnvironment } from './tonemap.ts';
 import { run } from './process.ts';
+import { EncodingStallError } from './progress.ts';
 import { Store, type Job } from './store.ts';
 
 async function exists(path: string): Promise<boolean> {
@@ -106,40 +107,50 @@ export class Worker {
       await mkdir(rt.transcodeDir, { recursive: true });
       await removeFile(temp);
       const duration = Number(media.format.duration);
-      let lastProgress = 0;
       const deadline = Date.now() + config.encodeTimeoutSeconds * 1000;
-      const encode = async (args: string[]) => {
-        await run(rt.ffmpeg, args, {
-          env: plan.vulkanFiltering ? await toneMappingEnvironment(rt) : undefined,
-          signal,
-          timeoutMs: Math.max(1, deadline - Date.now()),
-          onLine: (line) => {
-            if (
-              line.startsWith('out_time_us=') &&
-              Date.now() - lastProgress > 1000 &&
-              duration > 0
-            ) {
-              const progress =
-                (Number(line.slice('out_time_us='.length)) / 1000000 / duration) * 100;
-              if (Number.isFinite(progress))
-                store.patch(job.id, { progress: Math.max(0, Math.min(99, progress)) });
-              lastProgress = Date.now();
-            }
-          },
-        });
+      const encode = async (args: string[], decoder: 'cpu' | 'vulkan') => {
+        let lastProgress = 0;
+        try {
+          await run(rt.ffmpeg, args, {
+            env: plan.vulkanFiltering ? await toneMappingEnvironment(rt) : undefined,
+            signal,
+            timeoutMs: Math.max(1, deadline - Date.now()),
+            encodingProgress: {
+              onAdvance: (outputTimeUs) => {
+                if (Date.now() - lastProgress >= 1000 && duration > 0) {
+                  const progress = (outputTimeUs / 1000000 / duration) * 100;
+                  if (Number.isFinite(progress))
+                    store.patch(job.id, { progress: Math.max(0, Math.min(99, progress)) });
+                  lastProgress = Date.now();
+                }
+              },
+              onWarning: (outputTimeUs) => {
+                log('job.encode.warning', {
+                  id: job.id,
+                  decoder,
+                  message: 'Output timestamp has not advanced for 2 minutes',
+                  outputTimeSeconds: outputTimeUs / 1000000,
+                });
+              },
+            },
+          });
+        } catch (error) {
+          if (error instanceof EncodingStallError)
+            log('job.encode.stalled', { id: job.id, decoder, error: error.message });
+          throw error;
+        }
         const encoded = await probe(temp, rt, signal);
         validateOutput(media, encoded, plan);
       };
       try {
-        await encode(plan.args);
+        await encode(plan.args, plan.decoder);
       } catch (error) {
         signal.throwIfAborted();
         if (!plan.softwareArgs || Date.now() >= deadline) throw error;
         log('job.decoder.fallback', { id: job.id, error: errorMessage(error) });
         await removeFile(temp);
         store.patch(job.id, { progress: 0, message: 'Vulkan failed; restarted with CPU decoding' });
-        lastProgress = 0;
-        await encode(plan.softwareArgs);
+        await encode(plan.softwareArgs, 'cpu');
       }
       // Fully decode audio/video before publication; ffprobe alone cannot detect a truncated/corrupt packet stream.
       await run(

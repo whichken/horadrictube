@@ -132,7 +132,7 @@ The initial candidates are H.264, HEVC and AV1 with 8/10-bit 4:2:0 pixels.
 The GPU/driver must support the actual codec, profile and resolution. Each job
 first decodes up to 32 frames through its planned filter chain with a 30-second
 timeout. Unsupported hardware or a failing filter graph selects CPU decoding and
-logs the reason. If a selected Vulkan encode fails, its partial file is removed
+logs the reason. If a selected Vulkan encode fails or stalls, its partial file is removed
 and the same job starts again with CPU decoding, within the remaining encode
 timeout. Scaling and tone mapping retain the explicitly configured backend on
 fallback.
@@ -155,7 +155,7 @@ DECODE_BACKEND=vulkan VULKAN_DEVICE=NVIDIA \
 ```
 
 `job.decoder` logs the selected path and preflight result;
-`job.decoder.fallback` reports a restart after a hardware encode failure.
+`job.decoder.fallback` reports a restart after a hardware encode failure or stall.
 The plan API also returns `decoder` and `decodeReason`.
 `--check-media` checks tone mapping/encoding only; the actual-source preflight
 checks Vulkan decoding. Unsupported codecs fall back to CPU. Speed depends on
@@ -304,6 +304,20 @@ curl -X POST -H "Authorization: Bearer $API_KEY" http://localhost:5000/jobs/JOB_
 ```
 
 Jobs move through `queued`, `running`, and `completed`/`skipped`/`failed`. They expose attempts, progress, output path, last message, and the JSON-encoded profile decision. Progress measures encoding; it stays below 100 until validation and publication finish. Status details and errors are available through the API and JSON stdout logs.
+
+Each encoding process has a progress watchdog, starting when FFmpeg launches.
+Only increasing `out_time_us` timestamps reset it; repeated, missing, invalid or
+backwards progress values do not count as activity or refresh the job's progress
+in the database. After **2 minutes** without advancement, `job.encode.warning`
+is logged once for that idle period. After **5 minutes**, the process receives
+SIGTERM, followed by SIGKILL after five seconds if necessary, and
+`job.encode.stalled` records the failure. Vulkan decoding gets the existing CPU
+decode fallback, with a fresh watchdog and the remaining overall encode timeout;
+the configured scaling/tone-mapping backend and x265 settings stay unchanged.
+A CPU stall fails that attempt with an explicit error and follows the normal
+`maxAttempts`/retry policy. Shutdown cancellation does not trigger fallback.
+The watchdog ends when the encode exits; probing and final validation retain
+their existing timeouts.
 
 Submission deduplication uses source path, requested profile, and source file identity/size/modification time. Repeated unchanged submissions return the same job—even after it fails—so use the retry endpoint to request another attempt. Requests received before a source is visible are queued and retried. A changed source can create a new job, but any existing companion is still left untouched. Profiles may produce different filenames through their rename rules. When they resolve to the same destination, the first published companion wins.
 
